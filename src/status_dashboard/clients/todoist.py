@@ -1,0 +1,196 @@
+import json
+import logging
+import os
+import re
+from dataclasses import dataclass
+from datetime import date, timedelta
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Task:
+    id: str
+    content: str
+    is_completed: bool
+    url: str
+    day_order: int = 0
+
+
+def _get_token() -> str | None:
+    return os.environ.get("TODOIST_API_TOKEN")
+
+
+def _slugify(text: str) -> str:
+    """Convert text to URL slug."""
+    # Remove markdown links, keep just the text
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    # Lowercase and replace non-alphanumeric with hyphens
+    slug = re.sub(r'[^a-z0-9]+', '-', text.lower())
+    # Remove leading/trailing hyphens and collapse multiple hyphens
+    slug = re.sub(r'-+', '-', slug).strip('-')
+    return slug[:50]  # Limit length
+
+
+def get_today_tasks(api_token: str | None = None) -> list[Task]:
+    """Get Todoist tasks due today, sorted by day_order (Today view order)."""
+    token = api_token or _get_token()
+    if not token:
+        logger.warning("TODOIST_API_TOKEN not set, skipping Todoist tasks")
+        return []
+
+    try:
+        # Use Sync API to get day_order field
+        response = httpx.post(
+            "https://api.todoist.com/sync/v9/sync",
+            headers={"Authorization": f"Bearer {token}"},
+            data={
+                "sync_token": "*",
+                "resource_types": '["items"]',
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except httpx.TimeoutException:
+        logger.error("Todoist API request timed out")
+        return []
+    except httpx.HTTPStatusError as e:
+        logger.error("Todoist API returned error: %s", e.response.status_code)
+        return []
+    except httpx.RequestError as e:
+        logger.error("Todoist API request failed: %s", e)
+        return []
+    except json.JSONDecodeError as e:
+        logger.error("Failed to parse Todoist response: %s", e)
+        return []
+
+    today = date.today().isoformat()
+    tasks = []
+
+    for item in data.get("items", []):
+        if item.get("checked") or item.get("is_deleted"):
+            continue
+
+        due = item.get("due")
+        if not due:
+            continue
+
+        # Check if due today or overdue
+        due_date = due.get("date", "")[:10]  # Get just the date part
+        if due_date > today:
+            continue
+
+        # Build new URL format: https://app.todoist.com/app/task/{slug}-{v2_id}
+        v2_id = item.get("v2_id", item["id"])
+        slug = _slugify(item["content"])
+        url = f"https://app.todoist.com/app/task/{slug}-{v2_id}"
+
+        tasks.append(Task(
+            id=item["id"],
+            content=item["content"],
+            is_completed=item.get("checked", False),
+            url=url,
+            day_order=item.get("day_order", 0),
+        ))
+
+    # Sort by day_order (Today view order)
+    tasks.sort(key=lambda t: t.day_order)
+
+    return tasks
+
+
+def complete_task(task_id: str, api_token: str | None = None) -> bool:
+    """Mark a Todoist task as complete. Returns True on success."""
+    token = api_token or _get_token()
+    if not token:
+        logger.error("TODOIST_API_TOKEN not set")
+        return False
+
+    try:
+        response = httpx.post(
+            f"https://api.todoist.com/rest/v2/tasks/{task_id}/close",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return True
+    except httpx.HTTPStatusError as e:
+        logger.error("Failed to complete task: %s", e.response.status_code)
+        return False
+    except httpx.RequestError as e:
+        logger.error("Failed to complete task: %s", e)
+        return False
+
+
+def _next_working_day(from_date: date | None = None) -> date:
+    """Get the next working day (Monday-Friday) after the given date."""
+    if from_date is None:
+        from_date = date.today()
+
+    next_day = from_date + timedelta(days=1)
+    # weekday(): Monday=0, Sunday=6
+    while next_day.weekday() >= 5:  # Saturday=5, Sunday=6
+        next_day += timedelta(days=1)
+    return next_day
+
+
+def defer_task(task_id: str, api_token: str | None = None) -> bool:
+    """Defer a Todoist task to the next working day. Returns True on success."""
+    token = api_token or _get_token()
+    if not token:
+        logger.error("TODOIST_API_TOKEN not set")
+        return False
+
+    next_day = _next_working_day()
+
+    try:
+        response = httpx.post(
+            f"https://api.todoist.com/rest/v2/tasks/{task_id}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={"due_date": next_day.isoformat()},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return True
+    except httpx.HTTPStatusError as e:
+        logger.error("Failed to defer task: %s", e.response.status_code)
+        return False
+    except httpx.RequestError as e:
+        logger.error("Failed to defer task: %s", e)
+        return False
+
+
+def create_task(content: str, due_string: str = "today", api_token: str | None = None) -> bool:
+    """Create a new Todoist task. Returns True on success."""
+    token = api_token or _get_token()
+    if not token:
+        logger.error("TODOIST_API_TOKEN not set")
+        return False
+
+    try:
+        response = httpx.post(
+            "https://api.todoist.com/rest/v2/tasks",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "content": content,
+                "due_string": due_string,
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        return True
+    except httpx.HTTPStatusError as e:
+        logger.error("Failed to create task: %s - %s", e.response.status_code, e.response.text)
+        return False
+    except httpx.RequestError as e:
+        logger.error("Failed to create task: %s", e)
+        return False
