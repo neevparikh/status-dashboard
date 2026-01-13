@@ -144,7 +144,26 @@ class Footer(TextualFooter):
                 )
 
 
-class ReviewRequestsDataTable(DataTable):
+class VimDataTable(DataTable):
+    """DataTable with vim-style navigation (j/k/g/G)."""
+
+    BINDINGS = [
+        Binding("j", "cursor_down", "Down", show=False),
+        Binding("k", "cursor_up", "Up", show=False),
+        Binding("g", "cursor_top", "Top", show=False),
+        Binding("G", "cursor_bottom", "Bottom", show=False),
+    ]
+
+    def action_cursor_top(self) -> None:
+        if self.row_count > 0:
+            self.move_cursor(row=0)
+
+    def action_cursor_bottom(self) -> None:
+        if self.row_count > 0:
+            self.move_cursor(row=self.row_count - 1)
+
+
+class ReviewRequestsDataTable(VimDataTable):
     """DataTable for review requests with remove reviewer binding."""
 
     BINDINGS = [
@@ -152,7 +171,7 @@ class ReviewRequestsDataTable(DataTable):
     ]
 
 
-class TodoistDataTable(DataTable):
+class TodoistDataTable(VimDataTable):
     """DataTable for Todoist tasks with defer binding."""
 
     BINDINGS = [
@@ -164,7 +183,7 @@ class TodoistDataTable(DataTable):
     ]
 
 
-class LinearDataTable(DataTable):
+class LinearDataTable(VimDataTable):
     """DataTable for Linear issues with state change bindings."""
 
     BINDINGS = [
@@ -183,7 +202,7 @@ class LinearDataTable(DataTable):
 class Panel(Container):
     """A panel with a title and data table."""
 
-    def __init__(self, title: str, panel_id: str, table_class: type[DataTable] = DataTable):
+    def __init__(self, title: str, panel_id: str, table_class: type[DataTable] = VimDataTable):
         super().__init__(id=panel_id)
         self.panel_title = title
         self.table_class = table_class
