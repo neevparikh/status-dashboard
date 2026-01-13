@@ -43,6 +43,7 @@ A terminal dashboard for tracking PRs, Todoist tasks, and Linear issues.
 | Key | Action |
 |-----|--------|
 | `a` | Add new task |
+| `d` | Delete task |
 | `n` | Defer task to next working day |
 
 ### Linear

@@ -5,16 +5,19 @@ import logging.handlers
 import os
 import sys
 import webbrowser
+from collections import defaultdict
+from itertools import groupby
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.coordinate import Coordinate
 from textual.containers import Container, VerticalScroll
-from rich.text import Text
-from textual.widgets import DataTable, Footer, Header, Static
+from textual.coordinate import Coordinate
+from textual.widgets import DataTable, Footer as TextualFooter, Header, Static
+from textual.widgets._footer import FooterKey, FooterLabel, KeyGroup
 
 from status_dashboard.clients import github, linear, todoist
 from status_dashboard.widgets.create_modals import (
@@ -60,6 +63,79 @@ def _setup_logging() -> None:
 _setup_logging()
 
 
+class Footer(TextualFooter):
+    """Custom Footer that shows global bindings before pane-specific ones."""
+
+    def compose(self):
+        if not self._bindings_ready:
+            return
+        active_bindings = self.screen.active_bindings
+
+        def sort_key(item):
+            node = item[1][0]
+            return 0 if isinstance(node, StatusDashboard) else 1
+
+        sorted_items = sorted(active_bindings.items(), key=sort_key)
+        bindings = [
+            (binding, enabled, tooltip)
+            for (_, binding, enabled, tooltip) in (v for _, v in sorted_items)
+            if binding.show
+        ]
+        action_to_bindings: defaultdict[str, list[tuple]] = defaultdict(list)
+        for binding, enabled, tooltip in bindings:
+            action_to_bindings[binding.action].append((binding, enabled, tooltip))
+
+        self.styles.grid_size_columns = len(action_to_bindings)
+
+        for group, multi_bindings_iterable in groupby(
+            action_to_bindings.values(),
+            lambda multi_bindings_: multi_bindings_[0][0].group,
+        ):
+            multi_bindings = list(multi_bindings_iterable)
+            if group is not None and len(multi_bindings) > 1:
+                with KeyGroup(classes="-compact" if group.compact else ""):
+                    for multi_bindings in multi_bindings:
+                        binding, enabled, tooltip = multi_bindings[0]
+                        yield FooterKey(
+                            binding.key,
+                            self.app.get_key_display(binding),
+                            "",
+                            binding.action,
+                            disabled=not enabled,
+                            tooltip=tooltip or binding.description,
+                            classes="-grouped",
+                        ).data_bind(compact=TextualFooter.compact)
+                yield FooterLabel(group.description)
+            else:
+                for multi_bindings in multi_bindings:
+                    binding, enabled, tooltip = multi_bindings[0]
+                    yield FooterKey(
+                        binding.key,
+                        self.app.get_key_display(binding),
+                        binding.description,
+                        binding.action,
+                        disabled=not enabled,
+                        tooltip=tooltip,
+                    ).data_bind(compact=TextualFooter.compact)
+        if self.show_command_palette and self.app.ENABLE_COMMAND_PALETTE:
+            try:
+                _node, binding, enabled, tooltip = active_bindings[
+                    self.app.COMMAND_PALETTE_BINDING
+                ]
+            except KeyError:
+                pass
+            else:
+                yield FooterKey(
+                    binding.key,
+                    self.app.get_key_display(binding),
+                    binding.description,
+                    binding.action,
+                    classes="-command-palette",
+                    disabled=not enabled,
+                    tooltip=binding.tooltip or binding.description,
+                )
+
+
 class ReviewRequestsDataTable(DataTable):
     """DataTable for review requests with remove reviewer binding."""
 
@@ -74,6 +150,7 @@ class TodoistDataTable(DataTable):
     BINDINGS = [
         Binding("n", "app.defer_task", "Defer"),
         Binding("a", "app.create_todoist_task", "Add Task"),
+        Binding("d", "app.delete_task", "Delete"),
     ]
 
 
@@ -458,6 +535,42 @@ class StatusDashboard(App):
             self._refresh_todoist()
         else:
             self.notify("Failed to defer task", severity="error")
+
+    def action_delete_task(self) -> None:
+        """Delete the selected Todoist task."""
+        focused = self.focused
+        if not isinstance(focused, DataTable):
+            return
+
+        if focused.id != "todoist-table":
+            self.notify("Can only delete Todoist tasks", severity="warning")
+            return
+
+        if focused.cursor_row is None or focused.row_count == 0:
+            return
+
+        cell_key = focused.coordinate_to_cell_key(Coordinate(focused.cursor_row, 0))
+        if not cell_key.row_key or not cell_key.row_key.value:
+            return
+
+        key = str(cell_key.row_key.value)
+
+        if not key.startswith("todoist:"):
+            return
+
+        parts = key.split(":", 2)
+        if len(parts) >= 2:
+            task_id = parts[1]
+            self._do_delete_todoist_task(task_id)
+
+    @work(exclusive=False)
+    async def _do_delete_todoist_task(self, task_id: str) -> None:
+        success = await asyncio.to_thread(todoist.delete_task, task_id)
+        if success:
+            self.notify("Task deleted")
+            self._refresh_todoist()
+        else:
+            self.notify("Failed to delete task", severity="error")
 
     @work(exclusive=False)
     async def _do_complete_linear_issue(self, issue_id: str, team_id: str) -> None:
