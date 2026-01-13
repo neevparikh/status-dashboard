@@ -1,8 +1,10 @@
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
 import webbrowser
+from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 from textual import work
@@ -32,10 +34,29 @@ def _load_hidden_review_requests() -> set[tuple[str, int]]:
 
 HIDDEN_REVIEW_REQUESTS = _load_hidden_review_requests()
 
-logging.basicConfig(
-    level=logging.WARNING,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+def _setup_logging() -> None:
+    """Configure logging to stderr and a rotating log file."""
+    log_dir = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "status-dashboard"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "status-dashboard.log"
+
+    log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    formatter = logging.Formatter(log_format)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.WARNING)
+
+    stderr_handler = logging.StreamHandler()
+    stderr_handler.setFormatter(formatter)
+    root_logger.addHandler(stderr_handler)
+
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file, maxBytes=1_000_000, backupCount=3
+    )
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+
+_setup_logging()
 
 
 class ReviewRequestsDataTable(DataTable):
