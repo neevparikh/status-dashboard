@@ -75,8 +75,8 @@ mutation UpdateIssue($issueId: String!, $stateId: String!) {
 """
 
 CREATE_ISSUE_MUTATION = """
-mutation CreateIssue($teamId: String!, $title: String!, $stateId: String, $assigneeId: String) {
-  issueCreate(input: { teamId: $teamId, title: $title, stateId: $stateId, assigneeId: $assigneeId }) {
+mutation CreateIssue($teamId: String!, $title: String!, $stateId: String, $assigneeId: String, $projectId: String) {
+  issueCreate(input: { teamId: $teamId, title: $title, stateId: $stateId, assigneeId: $assigneeId, projectId: $projectId }) {
     success
     issue {
       id
@@ -131,6 +131,31 @@ query GetTeamMembers {
 }
 """
 
+GET_PROJECT_ID_QUERY = """
+query GetProjectId($projectName: String!) {
+  projects(filter: { name: { containsIgnoreCase: $projectName } }) {
+    nodes {
+      id
+      name
+    }
+  }
+}
+"""
+
+GET_ISSUE_QUERY = """
+query GetIssue($issueId: String!) {
+  issue(id: $issueId) {
+    id
+    state {
+      name
+    }
+    assignee {
+      id
+    }
+  }
+}
+"""
+
 # Map state names to their types for lookup
 STATE_NAME_MAP = {
     "backlog": "Backlog",
@@ -139,6 +164,9 @@ STATE_NAME_MAP = {
     "in_review": "In Review",
     "done": "Done",
 }
+
+# Reverse mapping from display name to internal key
+STATE_DISPLAY_TO_KEY = {v: k for k, v in STATE_NAME_MAP.items()}
 
 
 def _get_initials(name: str | None) -> str | None:
@@ -363,24 +391,63 @@ def get_team_members(api_key: str | None = None) -> list[dict]:
         return []
 
 
+def get_project_id(project_name: str, api_key: str | None = None) -> str | None:
+    key = api_key or os.environ.get("LINEAR_API_KEY")
+    if not key:
+        logger.error("LINEAR_API_KEY not set")
+        return None
+
+    try:
+        response = httpx.post(
+            "https://api.linear.app/graphql",
+            json={
+                "query": GET_PROJECT_ID_QUERY,
+                "variables": {"projectName": project_name},
+            },
+            headers={"Authorization": key},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if "errors" in data:
+            logger.error("Linear API error getting project ID: %s", data["errors"])
+            return None
+
+        projects = data.get("data", {}).get("projects", {}).get("nodes", [])
+        if not projects:
+            logger.error("Project '%s' not found", project_name)
+            return None
+
+        return projects[0]["id"]
+
+    except httpx.RequestError as e:
+        logger.error("Failed to get project ID: %s", e)
+        return None
+
+
 def create_issue(
     title: str,
     team_id: str,
     state_name: str | None = None,
     assignee_id: str | None = None,
+    project_name: str | None = None,
     api_key: str | None = None,
 ) -> bool:
     """Create a new Linear issue. Returns True on success.
 
     state_name should be one of: backlog, todo, in_progress, in_review, done
     If not provided, uses the team's default state.
+    project_name defaults to LINEAR_PROJECT env var if not provided.
     """
     key = api_key or os.environ.get("LINEAR_API_KEY")
     if not key:
         logger.error("LINEAR_API_KEY not set")
         return False
 
-    # Get state ID if state_name is provided
+    project = project_name or os.environ.get("LINEAR_PROJECT", "")
+    project_id = get_project_id(project, key) if project else None
+
     state_id = None
     if state_name:
         target_state = STATE_NAME_MAP.get(state_name)
@@ -428,6 +495,8 @@ def create_issue(
             variables["stateId"] = state_id
         if assignee_id:
             variables["assigneeId"] = assignee_id
+        if project_id:
+            variables["projectId"] = project_id
 
         response = httpx.post(
             "https://api.linear.app/graphql",
@@ -508,3 +577,45 @@ def assign_issue(issue_id: str, assignee_id: str | None, api_key: str | None = N
     except httpx.RequestError as e:
         logger.error("Failed to assign issue: %s", e)
         return False
+
+
+def get_issue(issue_id: str, api_key: str | None = None) -> dict | None:
+    """Get a Linear issue by ID. Returns dict with state and assignee info, or None."""
+    key = api_key or os.environ.get("LINEAR_API_KEY")
+    if not key:
+        logger.error("LINEAR_API_KEY not set")
+        return None
+
+    try:
+        response = httpx.post(
+            "https://api.linear.app/graphql",
+            json={
+                "query": GET_ISSUE_QUERY,
+                "variables": {"issueId": issue_id},
+            },
+            headers={"Authorization": key},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if "errors" in data:
+            logger.error("Linear API error getting issue: %s", data["errors"])
+            return None
+
+        return data.get("data", {}).get("issue")
+
+    except httpx.RequestError as e:
+        logger.error("Failed to get issue: %s", e)
+        return None
+
+
+def set_issue_state_by_name(
+    issue_id: str, team_id: str, state_display_name: str, api_key: str | None = None
+) -> bool:
+    """Set a Linear issue's state by display name (e.g., 'In Progress'). Returns True on success."""
+    state_key = STATE_DISPLAY_TO_KEY.get(state_display_name)
+    if not state_key:
+        logger.error("Unknown state display name: %s", state_display_name)
+        return False
+    return set_issue_state(issue_id, team_id, state_key, api_key)
