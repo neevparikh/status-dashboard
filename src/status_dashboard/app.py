@@ -702,17 +702,21 @@ class StatusDashboard(App):
             self.notify("Failed to fetch task", severity="error")
             return
 
-        description = task.get("description", "")
-        if not description:
-            self.notify("No description on this task", severity="warning")
+        url_pattern = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
+
+        content = task.get("content", "")
+        match = url_pattern.search(content)
+        if match:
+            webbrowser.open(match.group())
             return
 
-        url_pattern = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
+        description = task.get("description", "")
         match = url_pattern.search(description)
         if match:
             webbrowser.open(match.group())
-        else:
-            self.notify("No link found in description", severity="warning")
+            return
+
+        self.notify("No link found in task", severity="warning")
 
     @work(exclusive=False)
     async def _do_complete_linear_issue(self, issue_id: str, team_id: str) -> None:
