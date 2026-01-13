@@ -65,6 +65,8 @@ class LinearDataTable(DataTable):
         Binding("v", "app.set_linear_state('in_review')", "In Review"),
         Binding("d", "app.set_linear_state('done')", "Done"),
         Binding("i", "app.create_linear_issue", "New Issue"),
+        Binding("a", "app.assign_self_linear", "Assign Self"),
+        Binding("u", "app.unassign_linear", "Unassign"),
     ]
 
 
@@ -438,6 +440,60 @@ class StatusDashboard(App):
             self._refresh_linear()
         else:
             self.notify(f"Failed to set state to {state_display}", severity="error")
+
+    def _get_selected_linear_issue_id(self) -> str | None:
+        """Get the issue ID of the selected Linear issue, or None if not applicable."""
+        focused = self.focused
+        if not isinstance(focused, DataTable) or focused.id != "linear-table":
+            return None
+
+        if focused.cursor_row is None or focused.row_count == 0:
+            return None
+
+        cell_key = focused.coordinate_to_cell_key(Coordinate(focused.cursor_row, 0))
+        if not cell_key.row_key or not cell_key.row_key.value:
+            return None
+
+        key = str(cell_key.row_key.value)
+        if not key.startswith("linear:"):
+            return None
+
+        parts = key.split(":", 3)
+        return parts[1] if len(parts) >= 2 else None
+
+    def action_assign_self_linear(self) -> None:
+        """Assign the selected Linear issue to yourself."""
+        issue_id = self._get_selected_linear_issue_id()
+        if not issue_id:
+            self.notify("Select a Linear issue first", severity="warning")
+            return
+        self._do_assign_linear_issue(issue_id, assign=True)
+
+    def action_unassign_linear(self) -> None:
+        """Unassign the selected Linear issue."""
+        issue_id = self._get_selected_linear_issue_id()
+        if not issue_id:
+            self.notify("Select a Linear issue first", severity="warning")
+            return
+        self._do_assign_linear_issue(issue_id, assign=False)
+
+    @work(exclusive=False)
+    async def _do_assign_linear_issue(self, issue_id: str, assign: bool) -> None:
+        if assign:
+            viewer_id = await asyncio.to_thread(linear.get_viewer_id)
+            if not viewer_id:
+                self.notify("Failed to get your user ID", severity="error")
+                return
+            assignee_id = viewer_id
+        else:
+            assignee_id = None
+
+        success = await asyncio.to_thread(linear.assign_issue, issue_id, assignee_id)
+        if success:
+            self.notify("Assigned to you" if assign else "Unassigned")
+            self._refresh_linear()
+        else:
+            self.notify("Failed to update assignment", severity="error")
 
     def action_remove_self_as_reviewer(self) -> None:
         """Remove yourself as a reviewer from the selected PR."""

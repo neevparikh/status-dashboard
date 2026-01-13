@@ -87,6 +87,22 @@ mutation CreateIssue($teamId: String!, $title: String!, $stateId: String, $assig
 }
 """
 
+ASSIGN_ISSUE_MUTATION = """
+mutation AssignIssue($issueId: String!, $assigneeId: String) {
+  issueUpdate(id: $issueId, input: { assigneeId: $assigneeId }) {
+    success
+  }
+}
+"""
+
+GET_VIEWER_QUERY = """
+query GetViewer {
+  viewer {
+    id
+  }
+}
+"""
+
 GET_TEAM_QUERY = """
 query GetTeam($projectName: String!) {
   projects(filter: { name: { containsIgnoreCase: $projectName } }) {
@@ -435,4 +451,62 @@ def create_issue(
         return False
     except httpx.RequestError as e:
         logger.error("Failed to create issue: %s", e)
+        return False
+
+
+def get_viewer_id(api_key: str | None = None) -> str | None:
+    """Get the current user's ID. Returns None on error."""
+    key = api_key or os.environ.get("LINEAR_API_KEY")
+    if not key:
+        logger.error("LINEAR_API_KEY not set")
+        return None
+
+    try:
+        response = httpx.post(
+            "https://api.linear.app/graphql",
+            json={"query": GET_VIEWER_QUERY},
+            headers={"Authorization": key},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if "errors" in data:
+            logger.error("Linear API error getting viewer: %s", data["errors"])
+            return None
+
+        return data.get("data", {}).get("viewer", {}).get("id")
+
+    except httpx.RequestError as e:
+        logger.error("Failed to get viewer ID: %s", e)
+        return None
+
+
+def assign_issue(issue_id: str, assignee_id: str | None, api_key: str | None = None) -> bool:
+    """Assign or unassign a Linear issue. Pass None for assignee_id to unassign."""
+    key = api_key or os.environ.get("LINEAR_API_KEY")
+    if not key:
+        logger.error("LINEAR_API_KEY not set")
+        return False
+
+    try:
+        response = httpx.post(
+            "https://api.linear.app/graphql",
+            json={
+                "query": ASSIGN_ISSUE_MUTATION,
+                "variables": {"issueId": issue_id, "assigneeId": assignee_id},
+            },
+            headers={"Authorization": key},
+            timeout=10,
+        )
+        result = response.json()
+
+        if "errors" in result:
+            logger.error("Linear API error assigning issue: %s", result["errors"])
+            return False
+
+        return result.get("data", {}).get("issueUpdate", {}).get("success", False)
+
+    except httpx.RequestError as e:
+        logger.error("Failed to assign issue: %s", e)
         return False
