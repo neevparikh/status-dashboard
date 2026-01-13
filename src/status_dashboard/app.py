@@ -229,28 +229,31 @@ class StatusDashboard(App):
         prs = await asyncio.to_thread(github.get_my_prs)
         table.clear()
 
-        for pr in prs:
-            if pr.is_draft:
-                status = "draft"
-            elif pr.is_approved:
-                status = "approved"
-            elif pr.needs_response:
-                status = "needs response"
-            elif pr.has_review:
-                status = "reviewed"
-            else:
-                status = "waiting"
+        if not prs:
+            table.add_row("", Text("No open PRs", style="dim italic"), "", "")
+        else:
+            for pr in prs:
+                if pr.is_draft:
+                    status = "draft"
+                elif pr.is_approved:
+                    status = "approved"
+                elif pr.needs_response:
+                    status = "needs response"
+                elif pr.has_review:
+                    status = "reviewed"
+                else:
+                    status = "waiting"
 
-            repo = _short_repo(pr.repository)
-            table.add_row(
-                f"#{pr.number}",
-                pr.title,
-                repo,
-                status,
-                key=pr.url,
-            )
+                repo = _short_repo(pr.repository)
+                table.add_row(
+                    f"#{pr.number}",
+                    pr.title,
+                    repo,
+                    status,
+                    key=pr.url,
+                )
 
-        self._restore_cursor_by_key(table, selected_key)
+            self._restore_cursor_by_key(table, selected_key)
 
     @work(exclusive=False)
     async def _refresh_review_requests(self) -> None:
@@ -260,22 +263,24 @@ class StatusDashboard(App):
         prs = await asyncio.to_thread(github.get_review_requests)
         table.clear()
 
-        for pr in prs:
-            if (pr.repository, pr.number) in HIDDEN_REVIEW_REQUESTS:
-                continue
+        visible_prs = [pr for pr in prs if (pr.repository, pr.number) not in HIDDEN_REVIEW_REQUESTS]
 
-            repo = _short_repo(pr.repository)
-            age = github._relative_time(pr.created_at)
-            table.add_row(
-                f"#{pr.number}",
-                pr.title,
-                repo,
-                f"@{pr.author}",
-                age,
-                key=f"review:{pr.repository}:{pr.number}:{pr.url}",
-            )
+        if not visible_prs:
+            table.add_row("", Text("No review requests", style="dim italic"), "", "", "")
+        else:
+            for pr in visible_prs:
+                repo = _short_repo(pr.repository)
+                age = github._relative_time(pr.created_at)
+                table.add_row(
+                    f"#{pr.number}",
+                    pr.title,
+                    repo,
+                    f"@{pr.author}",
+                    age,
+                    key=f"review:{pr.repository}:{pr.number}:{pr.url}",
+                )
 
-        self._restore_cursor_by_key(table, selected_key)
+            self._restore_cursor_by_key(table, selected_key)
 
     def _get_selected_row_key(self, table: DataTable) -> str | None:
         if table.cursor_row is None or table.row_count == 0:
@@ -302,16 +307,19 @@ class StatusDashboard(App):
         tasks = await asyncio.to_thread(todoist.get_today_tasks)
         table.clear()
 
-        for task in tasks:
-            checkbox = "[x]" if task.is_completed else "[ ]"
-            content = task.content[:60] + "…" if len(task.content) > 60 else task.content
-            table.add_row(
-                checkbox,
-                content,
-                key=f"todoist:{task.id}:{task.url}",
-            )
+        if not tasks:
+            table.add_row("", Text("No tasks for today", style="dim italic"))
+        else:
+            for task in tasks:
+                checkbox = "[x]" if task.is_completed else "[ ]"
+                content = task.content[:60] + "…" if len(task.content) > 60 else task.content
+                table.add_row(
+                    checkbox,
+                    content,
+                    key=f"todoist:{task.id}:{task.url}",
+                )
 
-        self._restore_cursor_by_key(table, selected_key)
+            self._restore_cursor_by_key(table, selected_key)
 
     @work(exclusive=False)
     async def _refresh_linear(self) -> None:
@@ -321,21 +329,23 @@ class StatusDashboard(App):
         issues = await asyncio.to_thread(linear.get_project_issues)
         table.clear()
 
-        for issue in issues:
-            if issue.state in ("Done", "Canceled", "Duplicate"):
-                continue
+        visible_issues = [i for i in issues if i.state not in ("Done", "Canceled", "Duplicate")]
 
-            assignee = issue.assignee_initials or ""
-            title = issue.title[:50] + "…" if len(issue.title) > 50 else issue.title
-            table.add_row(
-                issue.identifier,
-                title,
-                issue.state,
-                assignee,
-                key=f"linear:{issue.id}:{issue.team_id}:{issue.url}",
-            )
+        if not visible_issues:
+            table.add_row("", Text("No active issues", style="dim italic"), "", "")
+        else:
+            for issue in visible_issues:
+                assignee = issue.assignee_initials or ""
+                title = issue.title[:50] + "…" if len(issue.title) > 50 else issue.title
+                table.add_row(
+                    issue.identifier,
+                    title,
+                    issue.state,
+                    assignee,
+                    key=f"linear:{issue.id}:{issue.team_id}:{issue.url}",
+                )
 
-        self._restore_cursor_by_key(table, selected_key)
+            self._restore_cursor_by_key(table, selected_key)
 
     def action_refresh(self) -> None:
         self.refresh_all()
