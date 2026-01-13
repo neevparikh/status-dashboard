@@ -3,6 +3,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import sys
 import webbrowser
 from collections import defaultdict
@@ -20,6 +21,13 @@ from textual.widgets import DataTable, Footer as TextualFooter, Header, Static
 from textual.widgets._footer import FooterKey, FooterLabel, KeyGroup
 
 from status_dashboard.clients import github, linear, todoist
+from status_dashboard.undo import (
+    LinearAssignAction,
+    LinearSetStateAction,
+    TodoistCompleteAction,
+    TodoistDeferAction,
+    UndoStack,
+)
 from status_dashboard.widgets.create_modals import (
     CreateLinearIssueModal,
     CreateTodoistTaskModal,
@@ -148,9 +156,11 @@ class TodoistDataTable(DataTable):
     """DataTable for Todoist tasks with defer binding."""
 
     BINDINGS = [
-        Binding("n", "app.defer_task", "Defer"),
         Binding("a", "app.create_todoist_task", "Add Task"),
+        Binding("c", "app.complete_task", "Complete"),
+        Binding("n", "app.defer_task", "Defer"),
         Binding("d", "app.delete_task", "Delete"),
+        Binding("o", "app.open_task_link", "Open Link"),
     ]
 
 
@@ -158,14 +168,15 @@ class LinearDataTable(DataTable):
     """DataTable for Linear issues with state change bindings."""
 
     BINDINGS = [
+        Binding("i", "app.create_linear_issue", "New Issue"),
+        Binding("a", "app.assign_self_linear", "Assign Self"),
+        Binding("u", "app.unassign_linear", "Unassign"),
+        Binding("c", "app.complete_task", "Complete"),
         Binding("b", "app.set_linear_state('backlog')", "Backlog"),
         Binding("t", "app.set_linear_state('todo')", "Todo"),
         Binding("p", "app.set_linear_state('in_progress')", "In Progress"),
         Binding("v", "app.set_linear_state('in_review')", "In Review"),
         Binding("d", "app.set_linear_state('done')", "Done"),
-        Binding("i", "app.create_linear_issue", "New Issue"),
-        Binding("a", "app.assign_self_linear", "Assign Self"),
-        Binding("u", "app.unassign_linear", "Unassign"),
     ]
 
 
@@ -245,10 +256,10 @@ class StatusDashboard(App):
     """
 
     BINDINGS = [
-        Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
+        Binding("z", "undo", "Undo"),
         Binding("R", "restart", "Restart"),
-        Binding("c", "complete_task", "Complete"),
+        Binding("q", "quit", "Quit"),
         # Panel focus
         Binding("1", "focus_panel('my-prs')", "My PRs", show=False),
         Binding("2", "focus_panel('review-requests')", "Reviews", show=False),
@@ -274,6 +285,8 @@ class StatusDashboard(App):
         table.zebra_stripes = True
 
     def on_mount(self) -> None:
+        self._undo_stack = UndoStack()
+
         # Set up table columns - auto-sized based on content
         my_prs = self.query_one("#my-prs-table", DataTable)
         my_prs.add_columns("PR", "Title", "Repo", "Status")
@@ -438,6 +451,63 @@ class StatusDashboard(App):
         table = self.query_one(f"#{panel_id}-table", DataTable)
         table.focus()
 
+    def action_undo(self) -> None:
+        """Undo the most recent action."""
+        if self._undo_stack.is_empty():
+            self.notify("Nothing to undo", severity="warning")
+            return
+
+        action = self._undo_stack.pop()
+        if action is None:
+            return
+
+        self._execute_undo(action)
+
+    @work(exclusive=False)
+    async def _execute_undo(
+        self,
+        action: TodoistCompleteAction
+        | TodoistDeferAction
+        | LinearSetStateAction
+        | LinearAssignAction,
+    ) -> None:
+        """Execute the undo operation for a given action."""
+        success = False
+
+        if isinstance(action, TodoistCompleteAction):
+            success = await asyncio.to_thread(todoist.reopen_task, action.task_id)
+            if success:
+                self._refresh_todoist()
+
+        elif isinstance(action, TodoistDeferAction):
+            success = await asyncio.to_thread(
+                todoist.set_due_date, action.task_id, action.original_due_date
+            )
+            if success:
+                self._refresh_todoist()
+
+        elif isinstance(action, LinearSetStateAction):
+            success = await asyncio.to_thread(
+                linear.set_issue_state_by_name,
+                action.issue_id,
+                action.team_id,
+                action.previous_state,
+            )
+            if success:
+                self._refresh_linear()
+
+        elif isinstance(action, LinearAssignAction):
+            success = await asyncio.to_thread(
+                linear.assign_issue, action.issue_id, action.previous_assignee_id
+            )
+            if success:
+                self._refresh_linear()
+
+        if success:
+            self.notify(f"Undid: {action.description}")
+        else:
+            self.notify(f"Failed to undo: {action.description}", severity="error")
+
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Handle Enter key on a row - open in browser."""
         key = str(event.row_key.value) if event.row_key.value else ""
@@ -479,7 +549,8 @@ class StatusDashboard(App):
             parts = key.split(":", 2)
             if len(parts) >= 2:
                 task_id = parts[1]
-                self._do_complete_todoist_task(task_id)
+                task_name = self._get_row_content(focused)
+                self._do_complete_todoist_task(task_id, task_name)
         elif focused.id == "linear-table" and key.startswith("linear:"):
             # Key format: "linear:{issue_id}:{team_id}:{url}"
             parts = key.split(":", 3)
@@ -490,10 +561,25 @@ class StatusDashboard(App):
         else:
             self.notify("Can only complete Todoist tasks or Linear issues", severity="warning")
 
+    def _get_row_content(self, table: DataTable) -> str:
+        """Get the content/title column text from the current row."""
+        if table.cursor_row is None or table.row_count == 0:
+            return ""
+        try:
+            row_data = table.get_row_at(table.cursor_row)
+            return str(row_data[1]) if len(row_data) > 1 else ""
+        except Exception:
+            return ""
+
     @work(exclusive=False)
-    async def _do_complete_todoist_task(self, task_id: str) -> None:
+    async def _do_complete_todoist_task(self, task_id: str, task_name: str | None) -> None:
         success = await asyncio.to_thread(todoist.complete_task, task_id)
         if success:
+            description = f"Complete: {task_name[:30]}" if task_name else "Complete task"
+            self._undo_stack.push(TodoistCompleteAction(
+                task_id=task_id,
+                description=description,
+            ))
             self.notify("Task completed!")
             self._refresh_todoist()
         else:
@@ -525,12 +611,22 @@ class StatusDashboard(App):
         parts = key.split(":", 2)
         if len(parts) >= 2:
             task_id = parts[1]
-            self._do_defer_todoist_task(task_id)
+            task_name = self._get_row_content(focused)
+            self._do_defer_todoist_task(task_id, task_name)
 
     @work(exclusive=False)
-    async def _do_defer_todoist_task(self, task_id: str) -> None:
+    async def _do_defer_todoist_task(self, task_id: str, task_name: str | None) -> None:
+        task = await asyncio.to_thread(todoist.get_task, task_id)
+        original_due = task.get("due", {}).get("date") if task and task.get("due") else None
+
         success = await asyncio.to_thread(todoist.defer_task, task_id)
         if success:
+            description = f"Defer: {task_name[:30]}" if task_name else "Defer task"
+            self._undo_stack.push(TodoistDeferAction(
+                task_id=task_id,
+                original_due_date=original_due,
+                description=description,
+            ))
             self.notify("Task deferred to next working day")
             self._refresh_todoist()
         else:
@@ -572,6 +668,52 @@ class StatusDashboard(App):
         else:
             self.notify("Failed to delete task", severity="error")
 
+    def action_open_task_link(self) -> None:
+        """Open the first link found in the selected Todoist task's description."""
+        focused = self.focused
+        if not isinstance(focused, DataTable):
+            return
+
+        if focused.id != "todoist-table":
+            self.notify("Can only open links from Todoist tasks", severity="warning")
+            return
+
+        if focused.cursor_row is None or focused.row_count == 0:
+            return
+
+        cell_key = focused.coordinate_to_cell_key(Coordinate(focused.cursor_row, 0))
+        if not cell_key.row_key or not cell_key.row_key.value:
+            return
+
+        key = str(cell_key.row_key.value)
+
+        if not key.startswith("todoist:"):
+            return
+
+        parts = key.split(":", 2)
+        if len(parts) >= 2:
+            task_id = parts[1]
+            self._do_open_task_link(task_id)
+
+    @work(exclusive=False)
+    async def _do_open_task_link(self, task_id: str) -> None:
+        task = await asyncio.to_thread(todoist.get_task, task_id)
+        if not task:
+            self.notify("Failed to fetch task", severity="error")
+            return
+
+        description = task.get("description", "")
+        if not description:
+            self.notify("No description on this task", severity="warning")
+            return
+
+        url_pattern = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
+        match = url_pattern.search(description)
+        if match:
+            webbrowser.open(match.group())
+        else:
+            self.notify("No link found in description", severity="warning")
+
     @work(exclusive=False)
     async def _do_complete_linear_issue(self, issue_id: str, team_id: str) -> None:
         success = await asyncio.to_thread(linear.complete_issue, issue_id, team_id)
@@ -608,13 +750,37 @@ class StatusDashboard(App):
         if len(parts) >= 3:
             issue_id = parts[1]
             team_id = parts[2]
-            self._do_set_linear_state(issue_id, team_id, state)
+            issue_identifier = self._get_row_identifier(focused)
+            self._do_set_linear_state(issue_id, team_id, state, issue_identifier)
+
+    def _get_row_identifier(self, table: DataTable) -> str:
+        """Get the identifier (first column) from the current row."""
+        if table.cursor_row is None or table.row_count == 0:
+            return ""
+        try:
+            row_data = table.get_row_at(table.cursor_row)
+            return str(row_data[0]) if row_data else ""
+        except Exception:
+            return ""
 
     @work(exclusive=False)
-    async def _do_set_linear_state(self, issue_id: str, team_id: str, state: str) -> None:
+    async def _do_set_linear_state(
+        self, issue_id: str, team_id: str, state: str, issue_identifier: str | None
+    ) -> None:
+        issue = await asyncio.to_thread(linear.get_issue, issue_id)
+        previous_state = issue.get("state", {}).get("name") if issue else None
+
         state_display = linear.STATE_NAME_MAP.get(state, state)
         success = await asyncio.to_thread(linear.set_issue_state, issue_id, team_id, state)
         if success:
+            if previous_state:
+                description = f"Set {issue_identifier or issue_id} to {state_display}"
+                self._undo_stack.push(LinearSetStateAction(
+                    issue_id=issue_id,
+                    team_id=team_id,
+                    previous_state=previous_state,
+                    description=description,
+                ))
             self.notify(f"Moved to {state_display}")
             self._refresh_linear()
         else:
@@ -640,21 +806,38 @@ class StatusDashboard(App):
         return parts[1] if len(parts) >= 2 else None
 
     def action_assign_self_linear(self) -> None:
+        focused = self.focused
+        if not isinstance(focused, DataTable) or focused.id != "linear-table":
+            self.notify("Select a Linear issue first", severity="warning")
+            return
         issue_id = self._get_selected_linear_issue_id()
         if not issue_id:
             self.notify("Select a Linear issue first", severity="warning")
             return
-        self._do_assign_linear_issue(issue_id, assign=True)
+        issue_identifier = self._get_row_identifier(focused)
+        self._do_assign_linear_issue(issue_id, assign=True, issue_identifier=issue_identifier)
 
     def action_unassign_linear(self) -> None:
+        focused = self.focused
+        if not isinstance(focused, DataTable) or focused.id != "linear-table":
+            self.notify("Select a Linear issue first", severity="warning")
+            return
         issue_id = self._get_selected_linear_issue_id()
         if not issue_id:
             self.notify("Select a Linear issue first", severity="warning")
             return
-        self._do_assign_linear_issue(issue_id, assign=False)
+        issue_identifier = self._get_row_identifier(focused)
+        self._do_assign_linear_issue(issue_id, assign=False, issue_identifier=issue_identifier)
 
     @work(exclusive=False)
-    async def _do_assign_linear_issue(self, issue_id: str, assign: bool) -> None:
+    async def _do_assign_linear_issue(
+        self, issue_id: str, assign: bool, issue_identifier: str | None
+    ) -> None:
+        issue = await asyncio.to_thread(linear.get_issue, issue_id)
+        previous_assignee_id = (
+            issue.get("assignee", {}).get("id") if issue and issue.get("assignee") else None
+        )
+
         if assign:
             viewer_id = await asyncio.to_thread(linear.get_viewer_id)
             if not viewer_id:
@@ -666,6 +849,12 @@ class StatusDashboard(App):
 
         success = await asyncio.to_thread(linear.assign_issue, issue_id, assignee_id)
         if success:
+            description = f"{'Assign' if assign else 'Unassign'} {issue_identifier or issue_id}"
+            self._undo_stack.push(LinearAssignAction(
+                issue_id=issue_id,
+                previous_assignee_id=previous_assignee_id,
+                description=description,
+            ))
             self.notify("Assigned to you" if assign else "Unassigned")
             self._refresh_linear()
         else:
