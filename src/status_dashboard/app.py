@@ -379,6 +379,7 @@ class StatusDashboard(App):
         self._todoist_tasks: list[todoist.Task] = []
         self._todoist_pending_orders: dict[str, int] | None = None
         self._todoist_debounce_handle: object | None = None
+        self._todoist_restore_key: str | None = None
 
         # Set up table columns - auto-sized based on content
         my_prs = self.query_one("#my-prs-table", DataTable)
@@ -483,6 +484,14 @@ class StatusDashboard(App):
             return str(cell_key.row_key.value)
         return None
 
+    def _get_row_key_above(self, table: DataTable) -> str | None:
+        if table.cursor_row is None or table.cursor_row == 0 or table.row_count == 0:
+            return None
+        cell_key = table.coordinate_to_cell_key(Coordinate(table.cursor_row - 1, 0))
+        if cell_key.row_key and cell_key.row_key.value:
+            return str(cell_key.row_key.value)
+        return None
+
     def _restore_cursor_by_key(self, table: DataTable, row_key: str | None) -> None:
         if not row_key or table.row_count == 0:
             return
@@ -500,7 +509,13 @@ class StatusDashboard(App):
 
     def _render_todoist_table(self, preserve_cursor: bool = True) -> None:
         table: DataTable = self.query_one("#todoist-table", DataTable)
-        selected_key = self._get_selected_row_key(table) if preserve_cursor else None
+        if self._todoist_restore_key:
+            selected_key = self._todoist_restore_key
+            self._todoist_restore_key = None
+        elif preserve_cursor:
+            selected_key = self._get_selected_row_key(table)
+        else:
+            selected_key = None
 
         table.clear()
 
@@ -664,6 +679,7 @@ class StatusDashboard(App):
             if len(parts) >= 2:
                 task_id = parts[1]
                 task_name = self._get_row_content(focused)
+                self._todoist_restore_key = self._get_row_key_above(focused)
                 self._do_complete_todoist_task(task_id, task_name)
         elif focused.id == "linear-table" and key.startswith("linear:"):
             # Key format: "linear:{issue_id}:{team_id}:{url}"
