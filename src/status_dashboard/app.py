@@ -17,7 +17,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
 from textual.coordinate import Coordinate
-from textual.widgets import DataTable, Footer as TextualFooter, Header, Static
+from textual.widgets import DataTable, Footer as TextualFooter, Static
 from textual.widgets._footer import FooterKey, FooterLabel, KeyGroup
 
 from status_dashboard.clients import github, linear, todoist
@@ -339,9 +339,6 @@ class StatusDashboard(App):
         dock: bottom;
     }
 
-    Header {
-        dock: top;
-    }
     """
 
     BINDINGS = [
@@ -351,10 +348,7 @@ class StatusDashboard(App):
         Binding("q", "quit", "Quit"),
     ]
 
-    TITLE = "Status Dashboard"
-
     def compose(self) -> ComposeResult:
-        yield Header()
         with VerticalScroll(can_focus=False):
             yield Panel("My PRs", "my-prs")
             yield Panel("Review Requests", "review-requests", table_class=ReviewRequestsDataTable)

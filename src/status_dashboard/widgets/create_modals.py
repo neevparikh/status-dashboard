@@ -9,6 +9,11 @@ from textual.widgets import Button, Input, Label, Select
 class CreateTodoistTaskModal(ModalScreen):
     """Modal for creating a new Todoist task."""
 
+    BINDINGS = [("escape", "dismiss_modal", "Close")]
+
+    def action_dismiss_modal(self) -> None:
+        self.dismiss(None)
+
     CSS = """
     CreateTodoistTaskModal {
         align: center middle;
@@ -92,6 +97,11 @@ class CreateTodoistTaskModal(ModalScreen):
 
 class CreateLinearIssueModal(ModalScreen):
     """Modal for creating a new Linear issue."""
+
+    BINDINGS = [("escape", "dismiss_modal", "Close")]
+
+    def action_dismiss_modal(self) -> None:
+        self.dismiss(None)
 
     CSS = """
     CreateLinearIssueModal {
