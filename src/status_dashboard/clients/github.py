@@ -22,6 +22,7 @@ class PullRequest:
     is_approved: bool = False
     needs_response: bool = False
     has_review: bool = False
+    ci_status: str | None = None
 
 
 @dataclass
@@ -103,6 +104,15 @@ query {{
             state
           }}
         }}
+        commits(last: 1) {{
+          nodes {{
+            commit {{
+              statusCheckRollup {{
+                state
+              }}
+            }}
+          }}
+        }}
       }}
     }}
   }}
@@ -166,6 +176,13 @@ def get_my_prs(org: str | None = None) -> list[PullRequest]:
             r.get("state") == "COMMENTED" for r in human_reviews
         )
 
+        commits = pr.get("commits", {}).get("nodes", [])
+        ci_state = None
+        if commits:
+            rollup = commits[0].get("commit", {}).get("statusCheckRollup")
+            if rollup:
+                ci_state = rollup.get("state")
+
         prs.append(PullRequest(
             number=pr["number"],
             title=pr["title"],
@@ -175,6 +192,7 @@ def get_my_prs(org: str | None = None) -> list[PullRequest]:
             is_approved=is_approved,
             needs_response=has_changes_requested or has_comments,
             has_review=len(human_reviews) > 0,
+            ci_status=ci_state,
         ))
 
     return prs
@@ -199,6 +217,35 @@ def remove_self_as_reviewer(repo: str, pr_number: int) -> bool:
         )
         if result.returncode != 0:
             logger.warning("Failed to remove reviewer: %s", result.stderr.strip())
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        logger.error("gh command timed out after %d seconds", SUBPROCESS_TIMEOUT)
+        return False
+    except FileNotFoundError:
+        logger.error("gh CLI not found. Install it from https://cli.github.com/")
+        return False
+
+
+def squash_merge_pr(repo: str, pr_number: int) -> bool:
+    """Squash merge a PR.
+
+    Args:
+        repo: Repository in 'owner/name' format
+        pr_number: PR number
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "merge", str(pr_number), "--repo", repo, "--squash"],
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT,
+        )
+        if result.returncode != 0:
+            logger.warning("Failed to merge PR: %s", result.stderr.strip())
             return False
         return True
     except subprocess.TimeoutExpired:

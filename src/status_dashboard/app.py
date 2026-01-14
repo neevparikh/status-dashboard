@@ -242,6 +242,14 @@ class ReviewRequestsDataTable(VimDataTable):
     ]
 
 
+class MyPRsDataTable(VimDataTable):
+    """DataTable for user's PRs with merge binding."""
+
+    BINDINGS = [
+        Binding("m", "app.merge_pr", "Merge"),
+    ]
+
+
 class TodoistDataTable(VimDataTable):
     """DataTable for Todoist tasks with defer binding."""
 
@@ -353,7 +361,7 @@ class StatusDashboard(App):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(can_focus=False):
-            yield Panel("My PRs", "my-prs")
+            yield Panel("My PRs", "my-prs", table_class=MyPRsDataTable)
             yield Panel("Review Requests", "review-requests", table_class=ReviewRequestsDataTable)
             yield Panel("Todoist (Today)", "todoist", table_class=TodoistDataTable)
             yield Panel("Linear", "linear", table_class=LinearDataTable)
@@ -367,13 +375,14 @@ class StatusDashboard(App):
 
     def on_mount(self) -> None:
         self._undo_stack = UndoStack()
+        self._my_prs: list[github.PullRequest] = []
         self._todoist_tasks: list[todoist.Task] = []
         self._todoist_pending_orders: dict[str, int] | None = None
         self._todoist_debounce_handle: object | None = None
 
         # Set up table columns - auto-sized based on content
         my_prs = self.query_one("#my-prs-table", DataTable)
-        my_prs.add_columns("#", "PR", "Title", "Repo", "Status")
+        my_prs.add_columns("#", "PR", "Title", "Repo", "Status", "CI")
         self._setup_table(my_prs)
 
         reviews = self.query_one("#review-requests-table", DataTable)
@@ -403,10 +412,11 @@ class StatusDashboard(App):
         selected_key = self._get_selected_row_key(table)
 
         prs = await asyncio.to_thread(github.get_my_prs)
+        self._my_prs = prs
         table.clear()
 
         if not prs:
-            table.add_row("", "", Text("No open PRs", style="dim italic"), "", "")
+            table.add_row("", "", Text("No open PRs", style="dim italic"), "", "", "")
         else:
             for pr in prs:
                 if pr.is_draft:
@@ -420,6 +430,8 @@ class StatusDashboard(App):
                 else:
                     status = "waiting"
 
+                ci_display = {"SUCCESS": "pass", "FAILURE": "fail", "PENDING": "...", "EXPECTED": "..."}.get(pr.ci_status, "")
+
                 repo = _short_repo(pr.repository)
                 table.add_row(
                     "",
@@ -427,6 +439,7 @@ class StatusDashboard(App):
                     pr.title,
                     repo,
                     status,
+                    ci_display,
                     key=pr.url,
                 )
 
@@ -1067,6 +1080,44 @@ class StatusDashboard(App):
         else:
             self.notify("Failed to remove self as reviewer", severity="error")
 
+    def action_merge_pr(self) -> None:
+        """Squash merge the selected approved PR."""
+        focused = self.focused
+        if not isinstance(focused, DataTable):
+            return
+
+        if focused.id != "my-prs-table":
+            self.notify("Can only merge from My PRs", severity="warning")
+            return
+
+        if focused.cursor_row is None or focused.row_count == 0:
+            return
+
+        cell_key = focused.coordinate_to_cell_key(Coordinate(focused.cursor_row, 0))
+        if not cell_key.row_key or not cell_key.row_key.value:
+            return
+
+        url = str(cell_key.row_key.value)
+
+        pr = next((p for p in self._my_prs if p.url == url), None)
+        if not pr:
+            return
+
+        if not pr.is_approved:
+            self.notify("Can only merge approved PRs", severity="warning")
+            return
+
+        self._do_merge_pr(pr.repository, pr.number)
+
+    @work(exclusive=False)
+    async def _do_merge_pr(self, repo: str, pr_number: int) -> None:
+        success = await asyncio.to_thread(github.squash_merge_pr, repo, pr_number)
+        if success:
+            self.notify(f"Merged PR #{pr_number}")
+            self._refresh_my_prs()
+        else:
+            self.notify("Failed to merge PR", severity="error")
+
     def action_create_todoist_task(self) -> None:
         """Show modal to create a new Todoist task."""
         self.push_screen(CreateTodoistTaskModal(), self._handle_todoist_task_created)
@@ -1101,15 +1152,16 @@ class StatusDashboard(App):
             self.notify("Failed to get team ID", severity="error")
             return
 
-        # Get team members
+        # Get team members and viewer ID
         team_members = await asyncio.to_thread(linear.get_team_members)
+        viewer_id = await asyncio.to_thread(linear.get_viewer_id)
 
         # Store team_id for later use
         self._linear_team_id = team_id
 
         # Show modal
         self.push_screen(
-            CreateLinearIssueModal(team_members),
+            CreateLinearIssueModal(team_members, viewer_id=viewer_id),
             self._handle_linear_issue_created,
         )
 

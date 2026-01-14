@@ -140,18 +140,19 @@ class CreateLinearIssueModal(ModalScreen):
     }
     """
 
-    def __init__(self, team_members: list[dict], *args, **kwargs):
-        """Initialize with team members data.
-
-        team_members should be a list of dicts with 'id', 'name', 'displayName' keys.
-        """
+    def __init__(self, team_members: list[dict], *args, viewer_id: str | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.team_members = team_members
+        self.viewer_id = viewer_id
 
     def compose(self) -> ComposeResult:
-        # Build assignee options
+        # Build assignee options, with viewer at the top
         assignee_options = [("Unassigned", "")]
-        for member in self.team_members:
+        sorted_members = sorted(
+            self.team_members,
+            key=lambda m: (m["id"] != self.viewer_id, m.get("displayName") or m.get("name", "")),
+        )
+        for member in sorted_members:
             display_name = member.get("displayName") or member.get("name", "Unknown")
             assignee_options.append((display_name, member["id"]))
 
