@@ -40,6 +40,7 @@ class ReviewRequest:
     url: str
     author: str
     created_at: datetime
+    requested_teams: list[str]
 
 
 @dataclass
@@ -158,6 +159,18 @@ query {{
           login
         }}
         createdAt
+        reviewRequests(first: 20) {{
+          nodes {{
+            requestedReviewer {{
+              ... on Team {{
+                slug
+              }}
+              ... on User {{
+                login
+              }}
+            }}
+          }}
+        }}
       }}
     }}
   }}
@@ -311,6 +324,14 @@ def get_review_requests(org: str | None = None) -> list[ReviewRequest]:
         if not pr:
             continue
 
+        # Extract requested teams from reviewRequests
+        requested_teams: list[str] = []
+        review_requests = pr.get("reviewRequests", {}).get("nodes", [])
+        for req in review_requests:
+            reviewer = req.get("requestedReviewer", {})
+            if reviewer and "slug" in reviewer:
+                requested_teams.append(reviewer["slug"])
+
         prs.append(
             ReviewRequest(
                 number=pr["number"],
@@ -319,6 +340,7 @@ def get_review_requests(org: str | None = None) -> list[ReviewRequest]:
                 url=pr["url"],
                 author=pr.get("author", {}).get("login", "unknown"),
                 created_at=_parse_datetime(pr["createdAt"]),
+                requested_teams=requested_teams,
             )
         )
 

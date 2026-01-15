@@ -71,6 +71,19 @@ LINEAR_STATE_SHORT = {
 }
 
 
+def _load_blocked_review_teams() -> set[str]:
+    """Load blocked teams from BLOCKED_REVIEW_TEAMS env var (JSON array of team slugs)."""
+    raw = os.environ.get("BLOCKED_REVIEW_TEAMS", "[]")
+    try:
+        teams: list[str] = json.loads(raw)
+        return {str(team) for team in teams}
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return set()
+
+
+BLOCKED_REVIEW_TEAMS = _load_blocked_review_teams()
+
+
 def _setup_logging() -> None:
     """Configure logging to stderr and a rotating log file."""
     xdg_state = os.environ.get("XDG_STATE_HOME")
@@ -549,9 +562,17 @@ class StatusDashboard(App):
         prs = await asyncio.to_thread(github.get_review_requests)
         table.clear()
 
-        visible_prs = [
-            pr for pr in prs if (pr.repository, pr.number) not in HIDDEN_REVIEW_REQUESTS
-        ]
+        def _is_visible(pr: github.ReviewRequest) -> bool:
+            if (pr.repository, pr.number) in HIDDEN_REVIEW_REQUESTS:
+                return False
+            # Hide if all requested teams are blocked (and there are teams)
+            if pr.requested_teams and all(
+                team in BLOCKED_REVIEW_TEAMS for team in pr.requested_teams
+            ):
+                return False
+            return True
+
+        visible_prs = [pr for pr in prs if _is_visible(pr)]
 
         if not visible_prs:
             table.add_row(
