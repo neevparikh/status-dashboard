@@ -278,8 +278,10 @@ class TodoistDataTable(VimDataTable):
         Binding("n", "app.defer_task", "Defer"),
         Binding("d", "app.delete_task", "Delete"),
         Binding("o", "app.open_task_link", "Open Link"),
-        Binding("J", "app.move_task_down", "Move Down"),
-        Binding("K", "app.move_task_up", "Move Up"),
+        Binding("J", "app.move_task_down", "Move Down", show=False),
+        Binding("K", "app.move_task_up", "Move Up", show=False),
+        Binding("shift+down", "app.move_task_down", "Move Down"),
+        Binding("shift+up", "app.move_task_up", "Move Up"),
     ]
 
 
