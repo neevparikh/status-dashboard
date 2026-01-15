@@ -719,12 +719,12 @@ class StatusDashboard(App):
             return False
 
     def _upgrade_uv_tool(self) -> tuple[bool, str]:
-        """Upgrade the uv tool and return (success, message)."""
+        """Force reinstall the uv tool and return (success, message)."""
         import subprocess
 
         try:
             result = subprocess.run(
-                ["uv", "tool", "upgrade", "--reinstall", "status-dashboard"],
+                ["uv", "tool", "install", "--force", "status-dashboard"],
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -733,7 +733,7 @@ class StatusDashboard(App):
                 return False, result.stderr[:100]
             return True, ""
         except subprocess.TimeoutExpired:
-            return False, "Upgrade timed out"
+            return False, "Reinstall timed out"
 
     @work(exclusive=False)
     async def _do_upgrade_and_restart(self) -> None:
