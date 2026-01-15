@@ -4,6 +4,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,17 @@ class ReviewRequest:
     url: str
     author: str
     created_at: datetime
+
+
+@dataclass
+class Notification:
+    id: str
+    reason: str
+    title: str
+    repository: str
+    url: str
+    updated_at: datetime
+    pr_number: int | None = None
 
 
 def _run_gh_graphql(query: str) -> dict | None:
@@ -299,3 +311,105 @@ def get_review_requests(org: str | None = None) -> list[ReviewRequest]:
         )
 
     return prs
+
+
+def _run_gh_api(endpoint: str, method: str = "GET") -> Any:
+    """Run a gh api command and return parsed JSON output."""
+    try:
+        cmd = ["gh", "api", endpoint]
+        if method != "GET":
+            cmd.extend(["-X", method])
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT,
+        )
+        if result.returncode != 0:
+            logger.warning("gh api failed: %s", result.stderr.strip())
+            return None
+        return json.loads(result.stdout) if result.stdout.strip() else None
+    except subprocess.TimeoutExpired:
+        logger.error("gh command timed out after %d seconds", SUBPROCESS_TIMEOUT)
+        return None
+    except json.JSONDecodeError as e:
+        logger.error("Failed to parse gh output: %s", e)
+        return None
+    except FileNotFoundError:
+        logger.error("gh CLI not found. Install it from https://cli.github.com/")
+        return None
+
+
+def get_notifications(org: str | None = None) -> list[Notification]:
+    """Get unread GitHub notifications for pull requests.
+
+    Filters to only PR-related notifications and optionally by organization.
+    """
+    owner = org or os.environ.get("GITHUB_ORG", "METR")
+    result = _run_gh_api("notifications?all=false&per_page=50")
+
+    if not result or not isinstance(result, list):
+        return []
+
+    notifications = []
+    for item in result:
+        subject = item.get("subject", {})
+        if subject.get("type") != "PullRequest":
+            continue
+
+        repo_full_name = item.get("repository", {}).get("full_name", "")
+        if owner and not repo_full_name.startswith(f"{owner}/"):
+            continue
+
+        subject_url = subject.get("url", "")
+        pr_number = None
+        html_url = ""
+        if subject_url:
+            parts = subject_url.split("/")
+            if len(parts) >= 2 and parts[-2] == "pulls":
+                pr_number = int(parts[-1])
+                html_url = f"https://github.com/{repo_full_name}/pull/{pr_number}"
+
+        notifications.append(
+            Notification(
+                id=item["id"],
+                reason=item.get("reason", "unknown"),
+                title=subject.get("title", ""),
+                repository=repo_full_name,
+                url=html_url,
+                updated_at=_parse_datetime(item["updated_at"]),
+                pr_number=pr_number,
+            )
+        )
+
+    return notifications
+
+
+def mark_notification_read(thread_id: str) -> bool:
+    """Mark a notification thread as read.
+
+    Args:
+        thread_id: The notification thread ID
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "api", f"notifications/threads/{thread_id}", "-X", "PATCH"],
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "Failed to mark notification read: %s", result.stderr.strip()
+            )
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        logger.error("gh command timed out after %d seconds", SUBPROCESS_TIMEOUT)
+        return False
+    except FileNotFoundError:
+        logger.error("gh CLI not found. Install it from https://cli.github.com/")
+        return False
