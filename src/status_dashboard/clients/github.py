@@ -41,6 +41,7 @@ class ReviewRequest:
     author: str
     created_at: datetime
     requested_teams: list[str]
+    has_other_review: bool  # True if someone else has already submitted a review
 
 
 @dataclass
@@ -169,6 +170,14 @@ query {{
                 login
               }}
             }}
+          }}
+        }}
+        latestReviews(first: 20) {{
+          nodes {{
+            author {{
+              login
+            }}
+            state
           }}
         }}
       }}
@@ -332,6 +341,15 @@ def get_review_requests(org: str | None = None) -> list[ReviewRequest]:
             if reviewer and "slug" in reviewer:
                 requested_teams.append(reviewer["slug"])
 
+        # Check if someone else has already submitted a review
+        reviews = pr.get("latestReviews", {}).get("nodes", [])
+        human_reviews = [
+            r
+            for r in reviews
+            if r.get("author", {}).get("login", "").lower() not in BOT_REVIEWERS
+        ]
+        has_other_review = len(human_reviews) > 0
+
         prs.append(
             ReviewRequest(
                 number=pr["number"],
@@ -341,6 +359,7 @@ def get_review_requests(org: str | None = None) -> list[ReviewRequest]:
                 author=pr.get("author", {}).get("login", "unknown"),
                 created_at=_parse_datetime(pr["createdAt"]),
                 requested_teams=requested_teams,
+                has_other_review=has_other_review,
             )
         )
 

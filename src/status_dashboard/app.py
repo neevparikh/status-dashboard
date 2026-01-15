@@ -364,11 +364,11 @@ class Panel(Container):
 
 
 def _short_repo(repo: str) -> str:
-    """Shorten 'METR/some-repo' to 'METR/some-'."""
+    """Shorten 'METR/some-repo' to 'METR/some-repo' (truncated)."""
     parts = repo.split("/")
     if len(parts) == 2:
-        org = parts[0][:5]
-        name = parts[1][:5]
+        org = parts[0][:6]
+        name = parts[1][:12]
         return f"{org}/{name}"
     return repo[:11]
 
@@ -478,7 +478,7 @@ class StatusDashboard(App):
         self._setup_table(my_prs)
 
         reviews = self.query_one("#review-requests-table", DataTable)
-        reviews.add_columns("#", "PR", "Title", "Repo", "Author", "Age")
+        reviews.add_columns("#", "PR", "Title", "Repo", "Author", "Age", "Reviewed")
         self._setup_table(reviews)
 
         notifs = self.query_one("#notifications-table", DataTable)
@@ -580,13 +580,14 @@ class StatusDashboard(App):
 
         if not visible_prs:
             table.add_row(
-                "", "", Text("No review requests", style="dim italic"), "", "", ""
+                "", "", Text("No review requests", style="dim italic"), "", "", "", ""
             )
         else:
             for pr in visible_prs:
                 repo = _short_repo(pr.repository)
                 age = github._relative_time(pr.created_at)
                 title = pr.title[:40] + "…" if len(pr.title) > 40 else pr.title
+                reviewed = "✓" if pr.has_other_review else ""
                 table.add_row(
                     "",
                     f"#{pr.number}",
@@ -594,6 +595,7 @@ class StatusDashboard(App):
                     repo,
                     f"@{pr.author}",
                     age,
+                    reviewed,
                     key=f"review:{pr.repository}:{pr.number}:{pr.url}",
                 )
 
