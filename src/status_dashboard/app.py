@@ -211,11 +211,19 @@ class VimDataTable(DataTable):
     def key_j(self) -> None:
         count = self._get_and_reset_count()
         for _ in range(count):
+            # If at bottom row, move to next panel
+            if self.cursor_row is not None and self.cursor_row >= self.row_count - 1:
+                self.app.action_focus_next()
+                return
             self.action_cursor_down()
 
     def key_k(self) -> None:
         count = self._get_and_reset_count()
         for _ in range(count):
+            # If at top row, move to previous panel
+            if self.cursor_row is not None and self.cursor_row <= 0:
+                self.app.action_focus_previous()
+                return
             self.action_cursor_up()
 
     def key_0(self) -> None:
