@@ -23,6 +23,7 @@ from textual.widgets._footer import FooterKey, FooterLabel, KeyGroup
 from status_dashboard.clients import github, linear, todoist
 from status_dashboard.undo import (
     LinearAssignAction,
+    LinearMoveAction,
     LinearSetStateAction,
     TodoistCompleteAction,
     TodoistDeferAction,
@@ -300,6 +301,10 @@ class LinearDataTable(VimDataTable):
         Binding("p", "app.set_linear_state('in_progress')", "In Progress"),
         Binding("v", "app.set_linear_state('in_review')", "In Review"),
         Binding("d", "app.set_linear_state('done')", "Done"),
+        Binding("J", "app.move_linear_issue_down", "Move Down", show=False),
+        Binding("K", "app.move_linear_issue_up", "Move Up", show=False),
+        Binding("shift+down", "app.move_linear_issue_down", "Move Down"),
+        Binding("shift+up", "app.move_linear_issue_up", "Move Up"),
     ]
 
 
@@ -409,6 +414,8 @@ class StatusDashboard(App):
         self._todoist_pending_orders: dict[str, int] | None = None
         self._todoist_debounce_handle: object | None = None
         self._todoist_restore_key: str | None = None
+        self._linear_issues: list[linear.Issue] = []
+        self._linear_debounce_handle: object | None = None
 
         # Set up table columns - auto-sized based on content
         my_prs = self.query_one("#my-prs-table", DataTable)
@@ -578,20 +585,22 @@ class StatusDashboard(App):
 
     @work(exclusive=False)
     async def _refresh_linear(self) -> None:
-        table: DataTable = self.query_one("#linear-table", DataTable)
-        selected_key = self._get_selected_row_key(table)
-
         issues = await asyncio.to_thread(linear.get_project_issues)
-        table.clear()
-
-        visible_issues = [
+        self._linear_issues = [
             i for i in issues if i.state not in ("Done", "Canceled", "Duplicate")
         ]
+        self._render_linear_table()
 
-        if not visible_issues:
+    def _render_linear_table(self, preserve_cursor: bool = True) -> None:
+        table: DataTable = self.query_one("#linear-table", DataTable)
+        selected_key = self._get_selected_row_key(table) if preserve_cursor else None
+
+        table.clear()
+
+        if not self._linear_issues:
             table.add_row("", "", Text("No active issues", style="dim italic"), "", "")
         else:
-            for issue in visible_issues:
+            for issue in self._linear_issues:
                 assignee = issue.assignee_initials or ""
                 title = issue.title[:50] + "…" if len(issue.title) > 50 else issue.title
                 table.add_row(
@@ -603,7 +612,8 @@ class StatusDashboard(App):
                     key=f"linear:{issue.id}:{issue.team_id}:{issue.url}",
                 )
 
-            self._restore_cursor_by_key(table, selected_key)
+            if selected_key:
+                self._restore_cursor_by_key(table, selected_key)
         table.refresh_line_numbers()
 
     def action_refresh(self) -> None:
@@ -633,7 +643,8 @@ class StatusDashboard(App):
         | TodoistDeferAction
         | TodoistMoveAction
         | LinearSetStateAction
-        | LinearAssignAction,
+        | LinearAssignAction
+        | LinearMoveAction,
     ) -> None:
         """Execute the undo operation for a given action."""
         success = False
@@ -670,6 +681,13 @@ class StatusDashboard(App):
         elif isinstance(action, LinearAssignAction):
             success = await asyncio.to_thread(
                 linear.assign_issue, action.issue_id, action.previous_assignee_id
+            )
+            if success:
+                self._refresh_linear()
+
+        elif isinstance(action, LinearMoveAction):
+            success = await asyncio.to_thread(
+                linear.update_sort_order, action.issue_id, action.previous_sort_order
             )
             if success:
                 self._refresh_linear()
@@ -1333,6 +1351,103 @@ class StatusDashboard(App):
             self._refresh_linear()
         else:
             self.notify("Failed to create issue", severity="error")
+
+    def action_move_linear_issue_down(self) -> None:
+        """Move the selected Linear issue down."""
+        self._move_linear_issue(1)
+
+    def action_move_linear_issue_up(self) -> None:
+        """Move the selected Linear issue up."""
+        self._move_linear_issue(-1)
+
+    def _move_linear_issue(self, direction: int) -> None:
+        """Move the selected Linear issue up (-1) or down (+1) with optimistic UI update."""
+        focused = self.focused
+        if not isinstance(focused, DataTable):
+            return
+
+        if focused.id != "linear-table":
+            self.notify("Can only move Linear issues", severity="warning")
+            return
+
+        if focused.cursor_row is None or focused.row_count == 0:
+            return
+
+        current_row = focused.cursor_row
+        target_row = current_row + direction
+
+        if target_row < 0 or target_row >= len(self._linear_issues):
+            return
+
+        moved_issue = self._linear_issues[current_row]
+        original_sort_order = moved_issue.sort_order
+
+        self._linear_issues[current_row], self._linear_issues[target_row] = (
+            self._linear_issues[target_row],
+            self._linear_issues[current_row],
+        )
+
+        self._render_linear_table(preserve_cursor=False)
+        focused.move_cursor(row=target_row)
+        row_region = focused._get_row_region(target_row)
+        focused.scroll_to_region(row_region, center=True, animate=False)
+
+        self._schedule_linear_sync(moved_issue.id, original_sort_order, target_row)
+
+    def _schedule_linear_sync(
+        self, issue_id: str, original_sort_order: float, target_row: int
+    ) -> None:
+        """Schedule a debounced sync of issue order to Linear API."""
+        if self._linear_debounce_handle:
+            self._linear_debounce_handle.stop()
+
+        self._linear_pending_move = (issue_id, original_sort_order, target_row)
+        self._linear_debounce_handle = self.set_timer(0.5, self._flush_linear_order)
+
+    @work(exclusive=False)
+    async def _flush_linear_order(self) -> None:
+        """Send current issue order to Linear API."""
+        self._linear_debounce_handle = None
+
+        if not hasattr(self, "_linear_pending_move"):
+            return
+
+        issue_id, original_sort_order, target_row = self._linear_pending_move
+        delattr(self, "_linear_pending_move")
+
+        if target_row < 0 or target_row >= len(self._linear_issues):
+            return
+
+        if target_row == 0:
+            new_sort_order = (
+                self._linear_issues[1].sort_order - 1.0
+                if len(self._linear_issues) > 1
+                else 0.0
+            )
+        elif target_row == len(self._linear_issues) - 1:
+            new_sort_order = self._linear_issues[-2].sort_order + 1.0
+        else:
+            prev_order = self._linear_issues[target_row - 1].sort_order
+            next_order = self._linear_issues[target_row + 1].sort_order
+            new_sort_order = (prev_order + next_order) / 2.0
+
+        self._linear_issues[target_row].sort_order = new_sort_order
+
+        success = await asyncio.to_thread(
+            linear.update_sort_order, issue_id, new_sort_order
+        )
+        if success:
+            issue = self._linear_issues[target_row]
+            self._undo_stack.push(
+                LinearMoveAction(
+                    issue_id=issue_id,
+                    previous_sort_order=original_sort_order,
+                    description=f"Move {issue.identifier}",
+                )
+            )
+        else:
+            self.notify("Failed to save issue order", severity="error")
+            self._refresh_linear()
 
 
 def main():

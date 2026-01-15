@@ -25,6 +25,7 @@ class Issue:
     url: str
     team_id: str = ""
     assignee_initials: str | None = None
+    sort_order: float = 0.0
 
 
 ISSUES_QUERY = """
@@ -40,6 +41,7 @@ query GetProjectIssues($projectName: String!) {
             name
           }
           url
+          sortOrder
           assignee {
             name
             displayName
@@ -90,6 +92,14 @@ mutation CreateIssue($teamId: String!, $title: String!, $stateId: String, $assig
 ASSIGN_ISSUE_MUTATION = """
 mutation AssignIssue($issueId: String!, $assigneeId: String) {
   issueUpdate(id: $issueId, input: { assigneeId: $assigneeId }) {
+    success
+  }
+}
+"""
+
+UPDATE_SORT_ORDER_MUTATION = """
+mutation UpdateSortOrder($issueId: String!, $sortOrder: Float!) {
+  issueUpdate(id: $issueId, input: { sortOrder: $sortOrder }) {
     success
   }
 }
@@ -238,11 +248,12 @@ def get_project_issues(
                     url=issue["url"],
                     team_id=issue.get("team", {}).get("id", ""),
                     assignee_initials=_get_initials(assignee_name),
+                    sort_order=issue.get("sortOrder", 0.0),
                 )
             )
 
-    # Sort by status order
-    issues.sort(key=lambda i: STATUS_ORDER.get(i.state, 99))
+    # Sort by sort_order (user-defined order)
+    issues.sort(key=lambda i: i.sort_order)
 
     return issues
 
@@ -637,3 +648,35 @@ def set_issue_state_by_name(
         logger.error("Unknown state display name: %s", state_display_name)
         return False
     return set_issue_state(issue_id, team_id, state_key, api_key)
+
+
+def update_sort_order(
+    issue_id: str, sort_order: float, api_key: str | None = None
+) -> bool:
+    """Update a Linear issue's sort order. Returns True on success."""
+    key = api_key or os.environ.get("LINEAR_API_KEY")
+    if not key:
+        logger.error("LINEAR_API_KEY not set")
+        return False
+
+    try:
+        response = httpx.post(
+            "https://api.linear.app/graphql",
+            json={
+                "query": UPDATE_SORT_ORDER_MUTATION,
+                "variables": {"issueId": issue_id, "sortOrder": sort_order},
+            },
+            headers={"Authorization": key},
+            timeout=10,
+        )
+        result = response.json()
+
+        if "errors" in result:
+            logger.error("Linear API error updating sort order: %s", result["errors"])
+            return False
+
+        return result.get("data", {}).get("issueUpdate", {}).get("success", False)
+
+    except httpx.RequestError as e:
+        logger.error("Failed to update sort order: %s", e)
+        return False

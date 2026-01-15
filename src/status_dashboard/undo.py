@@ -41,6 +41,13 @@ class LinearAssignAction(UndoAction):
     action_type: str = "linear_assign"
 
 
+@dataclass
+class LinearMoveAction(UndoAction):
+    issue_id: str = ""
+    previous_sort_order: float = 0.0
+    action_type: str = "linear_move"
+
+
 class UndoStack:
     def __init__(self, max_size: int = 15):
         self._stack: list[UndoAction] = []
