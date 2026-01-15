@@ -100,6 +100,10 @@ def _setup_logging() -> None:
     file_handler.setFormatter(formatter)
     root_logger.addHandler(file_handler)
 
+    # Silence noisy third-party libraries
+    for name in ("httpx", "httpcore", "hpack"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
 
 _setup_logging()
 
