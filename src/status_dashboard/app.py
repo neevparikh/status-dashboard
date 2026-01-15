@@ -258,6 +258,7 @@ class ReviewRequestsDataTable(VimDataTable):
 
     BINDINGS = [
         Binding("x", "remove_self_as_reviewer", "Remove Self"),
+        Binding("c", "app.copy_pr_link", "Copy Link"),
     ]
 
 
@@ -266,6 +267,7 @@ class MyPRsDataTable(VimDataTable):
 
     BINDINGS = [
         Binding("m", "app.merge_pr", "Merge"),
+        Binding("c", "app.copy_pr_link", "Copy Link"),
     ]
 
 
@@ -884,6 +886,8 @@ class StatusDashboard(App):
 
         self._render_todoist_table(preserve_cursor=False)
         focused.move_cursor(row=target_row)
+        row_region = focused._get_row_region(target_row)
+        focused.scroll_to_region(row_region, center=True, animate=False)
 
         self._schedule_todoist_sync()
 
@@ -1203,25 +1207,79 @@ class StatusDashboard(App):
         else:
             self.notify("Failed to merge PR", severity="error")
 
+    def action_copy_pr_link(self) -> None:
+        """Copy the selected PR's URL to the clipboard."""
+        focused = self.focused
+        if not isinstance(focused, DataTable):
+            return
+
+        if focused.id not in ("my-prs-table", "review-requests-table"):
+            self.notify("Can only copy links from PR tables", severity="warning")
+            return
+
+        if focused.cursor_row is None or focused.row_count == 0:
+            return
+
+        cell_key = focused.coordinate_to_cell_key(Coordinate(focused.cursor_row, 0))
+        if not cell_key.row_key or not cell_key.row_key.value:
+            return
+
+        key = str(cell_key.row_key.value)
+
+        if focused.id == "my-prs-table":
+            url = key
+        elif key.startswith("review:"):
+            url = key.split(":", 3)[3]
+        else:
+            return
+
+        self.copy_to_clipboard(url)
+        self.notify("Link copied to clipboard")
+
     def action_create_todoist_task(self) -> None:
         """Show modal to create a new Todoist task."""
-        self.push_screen(CreateTodoistTaskModal(), self._handle_todoist_task_created)
+        table = self.query_one("#todoist-table", TodoistDataTable)
+        insert_position = table.cursor_row or 0
 
-    def _handle_todoist_task_created(self, result: dict | None) -> None:
+        def handle_result(result: dict[str, str] | None) -> None:
+            self._handle_todoist_task_created(result, insert_position)
+
+        self.push_screen(CreateTodoistTaskModal(), handle_result)
+
+    def _handle_todoist_task_created(
+        self, result: dict[str, str] | None, insert_position: int
+    ) -> None:
         """Handle the result from the Todoist task creation modal."""
         if result:
             content = result["content"]
             due_string = result["due_string"]
-            self._do_create_todoist_task(content, due_string)
+            self._do_create_todoist_task(content, due_string, insert_position)
 
     @work(exclusive=False)
-    async def _do_create_todoist_task(self, content: str, due_string: str) -> None:
-        success = await asyncio.to_thread(todoist.create_task, content, due_string)
-        if success:
-            self.notify("Task created!")
-            self._refresh_todoist()
-        else:
+    async def _do_create_todoist_task(
+        self, content: str, due_string: str, insert_position: int
+    ) -> None:
+        new_task_id = await asyncio.to_thread(todoist.create_task, content, due_string)
+        if not new_task_id:
             self.notify("Failed to create task", severity="error")
+            return
+
+        self.notify("Task created!")
+
+        if not self._todoist_tasks:
+            self._refresh_todoist()
+            return
+
+        new_orders: dict[str, int] = {}
+        for idx, task in enumerate(self._todoist_tasks):
+            if idx < insert_position:
+                new_orders[task.id] = idx
+            else:
+                new_orders[task.id] = idx + 1
+        new_orders[new_task_id] = insert_position
+
+        await asyncio.to_thread(todoist.update_day_orders, new_orders)
+        self._refresh_todoist()
 
     def action_create_linear_issue(self) -> None:
         """Show modal to create a new Linear issue."""

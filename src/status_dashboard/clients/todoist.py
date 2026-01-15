@@ -172,12 +172,12 @@ def defer_task(task_id: str, api_token: str | None = None) -> bool:
 
 def create_task(
     content: str, due_string: str = "today", api_token: str | None = None
-) -> bool:
-    """Create a new Todoist task. Returns True on success."""
+) -> str | None:
+    """Create a new Todoist task. Returns the created task ID on success, None on failure."""
     token = api_token or _get_token()
     if not token:
         logger.error("TODOIST_API_TOKEN not set")
-        return False
+        return None
 
     try:
         response = httpx.post(
@@ -193,15 +193,15 @@ def create_task(
             timeout=10,
         )
         response.raise_for_status()
-        return True
+        return response.json().get("id")
     except httpx.HTTPStatusError as e:
         logger.error(
             "Failed to create task: %s - %s", e.response.status_code, e.response.text
         )
-        return False
+        return None
     except httpx.RequestError as e:
         logger.error("Failed to create task: %s", e)
-        return False
+        return None
 
 
 def delete_task(task_id: str, api_token: str | None = None) -> bool:
