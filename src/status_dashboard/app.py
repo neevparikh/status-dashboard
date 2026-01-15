@@ -724,7 +724,7 @@ class StatusDashboard(App):
 
         try:
             result = subprocess.run(
-                ["uv", "tool", "upgrade", "status-dashboard"],
+                ["uv", "tool", "upgrade", "--reinstall", "status-dashboard"],
                 capture_output=True,
                 text=True,
                 timeout=60,
