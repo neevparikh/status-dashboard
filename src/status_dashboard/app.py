@@ -724,7 +724,7 @@ class StatusDashboard(App):
 
         try:
             result = subprocess.run(
-                ["uv", "tool", "install", "--force", "status-dashboard"],
+                ["uv", "tool", "install", "--force", "git+https://github.com/tbroadley/status-dashboard"],
                 capture_output=True,
                 text=True,
                 timeout=60,
