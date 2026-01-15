@@ -30,9 +30,9 @@ class Issue:
 
 ISSUES_QUERY = """
 query GetProjectIssues($projectName: String!) {
-  projects(filter: { name: { containsIgnoreCase: $projectName } }) {
+  projects(filter: { name: { containsIgnoreCase: $projectName } }, first: 1) {
     nodes {
-      issues {
+      issues(first: 100) {
         nodes {
           id
           identifier
@@ -115,9 +115,9 @@ query GetViewer {
 
 GET_TEAM_QUERY = """
 query GetTeam($projectName: String!) {
-  projects(filter: { name: { containsIgnoreCase: $projectName } }) {
+  projects(filter: { name: { containsIgnoreCase: $projectName } }, first: 1) {
     nodes {
-      teams {
+      teams(first: 1) {
         nodes {
           id
           key
@@ -143,7 +143,7 @@ query GetTeamMembers {
 
 GET_PROJECT_ID_QUERY = """
 query GetProjectId($projectName: String!) {
-  projects(filter: { name: { containsIgnoreCase: $projectName } }) {
+  projects(filter: { name: { containsIgnoreCase: $projectName } }, first: 1) {
     nodes {
       id
       name
