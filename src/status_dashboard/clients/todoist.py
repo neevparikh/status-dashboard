@@ -5,7 +5,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from typing import Any
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import httpx
 
@@ -20,6 +20,7 @@ class Task:
     url: str
     day_order: int = 0
     due_date: str | None = None
+    due_time: str | None = None
 
 
 def _get_token() -> str | None:
@@ -35,6 +36,23 @@ def _slugify(text: str) -> str:
     # Remove leading/trailing hyphens and collapse multiple hyphens
     slug = re.sub(r"-+", "-", slug).strip("-")
     return slug[:50]  # Limit length
+
+
+def _extract_local_time(due_date_str: str) -> str | None:
+    """Extract time in local timezone from Todoist due date string.
+
+    Todoist returns dates in one of two formats:
+    - "2024-01-15" for all-day tasks (no time)
+    - "2024-01-15T14:30:00Z" for tasks with a specific time (always UTC)
+
+    Returns time as "HH:MM" in system timezone, or None if no time set.
+    """
+    if "T" not in due_date_str:
+        return None
+
+    utc_dt = datetime.fromisoformat(due_date_str.replace("Z", "+00:00"))
+    local_dt = utc_dt.astimezone()
+    return local_dt.strftime("%H:%M")
 
 
 def get_today_tasks(api_token: str | None = None) -> list[Task]:
@@ -82,9 +100,13 @@ def get_today_tasks(api_token: str | None = None) -> list[Task]:
             continue
 
         # Check if due today or overdue
-        due_date = due.get("date", "")[:10]  # Get just the date part
+        due_date_raw = due.get("date", "")
+        due_date = due_date_raw[:10]  # Get just the date part
         if due_date > today:
             continue
+
+        # Extract time if set (Todoist returns UTC datetime for timed tasks)
+        due_time = _extract_local_time(due_date_raw)
 
         # Build new URL format: https://app.todoist.com/app/task/{slug}-{v2_id}
         v2_id = item.get("v2_id", item["id"])
@@ -99,6 +121,7 @@ def get_today_tasks(api_token: str | None = None) -> list[Task]:
                 url=url,
                 day_order=item.get("day_order", 0),
                 due_date=due_date,
+                due_time=due_time,
             )
         )
 

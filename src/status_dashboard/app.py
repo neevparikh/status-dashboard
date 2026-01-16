@@ -449,7 +449,7 @@ class StatusDashboard(App):
         self._setup_table(notifs)
 
         todo = self.query_one("#todoist-table", DataTable)
-        todo.add_columns("#", "!", "", "Task")
+        todo.add_columns("#", "!", "", "Time", "Task")
         self._setup_table(todo)
 
         lin = self.query_one("#linear-table", DataTable)
@@ -628,11 +628,14 @@ class StatusDashboard(App):
 
         today = date.today().isoformat()
         if not self._todoist_tasks:
-            table.add_row("", "", "", Text("No tasks for today", style="dim italic"))
+            table.add_row(
+                "", "", "", "", Text("No tasks for today", style="dim italic")
+            )
         else:
             for task in self._todoist_tasks:
                 overdue = "!" if task.due_date and task.due_date < today else ""
                 checkbox = "[x]" if task.is_completed else "[ ]"
+                time_display = task.due_time or ""
                 content = (
                     task.content[:60] + "…" if len(task.content) > 60 else task.content
                 )
@@ -640,6 +643,7 @@ class StatusDashboard(App):
                     "",
                     overdue,
                     checkbox,
+                    time_display,
                     content,
                     key=f"todoist:{task.id}:{task.url}",
                 )
@@ -904,7 +908,7 @@ class StatusDashboard(App):
             return ""
         try:
             row_data = table.get_row_at(table.cursor_row)
-            col_idx = 3 if table.id == "todoist-table" else 2
+            col_idx = 4 if table.id == "todoist-table" else 2
             return str(row_data[col_idx]) if len(row_data) > col_idx else ""
         except Exception:
             return ""
