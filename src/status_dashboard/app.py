@@ -7,6 +7,7 @@ import re
 import sys
 import webbrowser
 from collections import defaultdict
+from datetime import date
 from itertools import groupby
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from textual.widgets._footer import FooterKey, FooterLabel, KeyGroup
 from status_dashboard.clients import github, linear, todoist
 from status_dashboard.undo import (
     LinearAssignAction,
+    LinearMoveAction,
     LinearSetStateAction,
     TodoistCompleteAction,
     TodoistDeferAction,
@@ -130,7 +132,9 @@ class Footer(TextualFooter):
         for binding, enabled, tooltip in bindings:
             action_to_bindings[binding.action].append((binding, enabled, tooltip))
 
-        self.styles.grid_size_columns = len(action_to_bindings)
+        num_bindings = len(action_to_bindings)
+        self.styles.grid_size_columns = (num_bindings + 1) // 2
+        self.styles.grid_size_rows = 2
 
         for group, multi_bindings_iterable in groupby(
             action_to_bindings.values(),
@@ -283,6 +287,16 @@ class ReviewRequestsDataTable(VimDataTable):
 
     BINDINGS = [
         Binding("x", "remove_self_as_reviewer", "Remove Self"),
+        Binding("c", "app.copy_pr_link", "Copy Link"),
+    ]
+
+
+class NotificationsDataTable(VimDataTable):
+    """DataTable for GitHub notifications with mark as read binding."""
+
+    BINDINGS = [
+        Binding("x", "app.mark_notification_read", "Mark Read"),
+        Binding("c", "app.copy_pr_link", "Copy Link"),
     ]
 
 
@@ -291,6 +305,7 @@ class MyPRsDataTable(VimDataTable):
 
     BINDINGS = [
         Binding("m", "app.merge_pr", "Merge"),
+        Binding("c", "app.copy_pr_link", "Copy Link"),
     ]
 
 
@@ -298,6 +313,7 @@ class TodoistDataTable(VimDataTable):
     """DataTable for Todoist tasks with defer binding."""
 
     BINDINGS = [
+        Binding("T", "app.reschedule_overdue_to_today", "Reschedule All"),
         Binding("a", "app.create_todoist_task", "Add Task"),
         Binding("c", "app.complete_task", "Complete"),
         Binding("n", "app.defer_task", "Defer"),
@@ -321,6 +337,10 @@ class LinearDataTable(VimDataTable):
         Binding("p", "app.set_linear_state('in_progress')", "In Progress"),
         Binding("v", "app.set_linear_state('in_review')", "In Review"),
         Binding("d", "app.set_linear_state('done')", "Done"),
+        Binding("J", "app.move_linear_issue_down", "Move Down", show=False),
+        Binding("K", "app.move_linear_issue_up", "Move Up", show=False),
+        Binding("shift+down", "app.move_linear_issue_down", "Move Down"),
+        Binding("shift+up", "app.move_linear_issue_up", "Move Up"),
     ]
 
 
@@ -394,6 +414,13 @@ class StatusDashboard(App):
 
     Footer {
         dock: bottom;
+        height: 2;
+        layout: grid;
+        grid-gutter: 0 1;
+    }
+
+    FooterKey {
+        height: 1;
     }
 
     """
@@ -403,6 +430,8 @@ class StatusDashboard(App):
         Binding("z", "undo", "Undo"),
         Binding("R", "restart", "Restart"),
         Binding("q", "quit", "Quit"),
+        Binding("ctrl+shift+up", "focus_previous_pane", "Prev Pane", show=False),
+        Binding("ctrl+shift+down", "focus_next_pane", "Next Pane", show=False),
     ]
 
     def compose(self) -> ComposeResult:
@@ -412,6 +441,11 @@ class StatusDashboard(App):
                 "Review Requests",
                 "review-requests",
                 table_class=ReviewRequestsDataTable,
+            )
+            yield Panel(
+                "Notifications",
+                "notifications",
+                table_class=NotificationsDataTable,
             )
             yield Panel("Todoist (Today)", "todoist", table_class=TodoistDataTable)
             yield Panel("Linear", "linear", table_class=LinearDataTable)
@@ -430,18 +464,24 @@ class StatusDashboard(App):
         self._todoist_pending_orders: dict[str, int] | None = None
         self._todoist_debounce_handle: object | None = None
         self._todoist_restore_key: str | None = None
+        self._linear_issues: list[linear.Issue] = []
+        self._linear_debounce_handle: object | None = None
 
         # Set up table columns - auto-sized based on content
         my_prs = self.query_one("#my-prs-table", DataTable)
-        my_prs.add_columns("#", "PR", "Title", "Repo", "Status", "CI")
+        my_prs.add_columns("#", "PR", "Title", "Repo", "Status", "CI", "Cmt")
         self._setup_table(my_prs)
 
         reviews = self.query_one("#review-requests-table", DataTable)
         reviews.add_columns("#", "PR", "Title", "Repo", "Author", "Age", "Reviewed")
         self._setup_table(reviews)
 
+        notifs = self.query_one("#notifications-table", DataTable)
+        notifs.add_columns("#", "PR", "Title", "Repo", "Reason", "Age")
+        self._setup_table(notifs)
+
         todo = self.query_one("#todoist-table", DataTable)
-        todo.add_columns("#", "", "Task")
+        todo.add_columns("#", "!", "", "Time", "#C", "Task")
         self._setup_table(todo)
 
         lin = self.query_one("#linear-table", DataTable)
@@ -454,6 +494,7 @@ class StatusDashboard(App):
     def refresh_all(self) -> None:
         self._refresh_my_prs()
         self._refresh_review_requests()
+        self._refresh_gh_notifications()
         self._refresh_todoist()
         self._refresh_linear()
 
@@ -467,7 +508,9 @@ class StatusDashboard(App):
         table.clear()
 
         if not prs:
-            table.add_row("", "", Text("No open PRs", style="dim italic"), "", "", "")
+            table.add_row(
+                "", "", Text("No open PRs", style="dim italic"), "", "", "", ""
+            )
         else:
             for pr in prs:
                 if pr.is_draft:
@@ -488,14 +531,22 @@ class StatusDashboard(App):
                     "EXPECTED": "...",
                 }.get(pr.ci_status, "")
 
+                comment_display = (
+                    str(pr.unresolved_comment_count)
+                    if pr.unresolved_comment_count > 0
+                    else ""
+                )
+
                 repo = _short_repo(pr.repository)
+                title = pr.title[:40] + "…" if len(pr.title) > 40 else pr.title
                 table.add_row(
                     "",
                     f"#{pr.number}",
-                    pr.title,
+                    title,
                     repo,
                     status,
                     ci_display,
+                    comment_display,
                     key=pr.url,
                 )
 
@@ -531,15 +582,47 @@ class StatusDashboard(App):
                 repo = _short_repo(pr.repository)
                 age = github._relative_time(pr.created_at)
                 reviewed = "✓" if pr.has_other_review else ""
+                title = pr.title[:40] + "…" if len(pr.title) > 40 else pr.title
                 table.add_row(
                     "",
                     f"#{pr.number}",
-                    pr.title,
+                    title,
                     repo,
                     f"@{pr.author}",
                     age,
                     reviewed,
                     key=f"review:{pr.repository}:{pr.number}:{pr.url}",
+                )
+
+            self._restore_cursor_by_key(table, selected_key)
+        table.refresh_line_numbers()
+
+    @work(exclusive=False)
+    async def _refresh_gh_notifications(self) -> None:
+        table = self.query_one("#notifications-table", NotificationsDataTable)
+        selected_key = self._get_selected_row_key(table)
+
+        notifications = await asyncio.to_thread(github.get_notifications)
+        table.clear()
+
+        if not notifications:
+            table.add_row(
+                "", "", Text("No notifications", style="dim italic"), "", "", ""
+            )
+        else:
+            for notif in notifications:
+                repo = _short_repo(notif.repository)
+                age = github._relative_time(notif.updated_at)
+                pr_display = f"#{notif.pr_number}" if notif.pr_number else ""
+                title = notif.title[:40] + "…" if len(notif.title) > 40 else notif.title
+                table.add_row(
+                    "",
+                    pr_display,
+                    title,
+                    repo,
+                    notif.reason,
+                    age,
+                    key=f"notif:{notif.id}:{notif.repository}:{notif.pr_number or ''}:{notif.url}",
                 )
 
             self._restore_cursor_by_key(table, selected_key)
@@ -588,17 +671,28 @@ class StatusDashboard(App):
 
         table.clear()
 
+        today = date.today().isoformat()
         if not self._todoist_tasks:
-            table.add_row("", "", Text("No tasks for today", style="dim italic"))
+            table.add_row(
+                "", "", "", "", "", Text("No tasks for today", style="dim italic")
+            )
         else:
             for task in self._todoist_tasks:
+                overdue = "!" if task.due_date and task.due_date < today else ""
                 checkbox = "[x]" if task.is_completed else "[ ]"
+                time_display = task.due_time or ""
+                comment_display = (
+                    str(task.comment_count) if task.comment_count > 0 else ""
+                )
                 content = (
                     task.content[:60] + "…" if len(task.content) > 60 else task.content
                 )
                 table.add_row(
                     "",
+                    overdue,
                     checkbox,
+                    time_display,
+                    comment_display,
                     content,
                     key=f"todoist:{task.id}:{task.url}",
                 )
@@ -609,20 +703,22 @@ class StatusDashboard(App):
 
     @work(exclusive=False)
     async def _refresh_linear(self) -> None:
-        table: DataTable = self.query_one("#linear-table", DataTable)
-        selected_key = self._get_selected_row_key(table)
-
         issues = await asyncio.to_thread(linear.get_project_issues)
-        table.clear()
-
-        visible_issues = [
+        self._linear_issues = [
             i for i in issues if i.state not in ("Done", "Canceled", "Duplicate")
         ]
+        self._render_linear_table()
 
-        if not visible_issues:
+    def _render_linear_table(self, preserve_cursor: bool = True) -> None:
+        table: DataTable = self.query_one("#linear-table", DataTable)
+        selected_key = self._get_selected_row_key(table) if preserve_cursor else None
+
+        table.clear()
+
+        if not self._linear_issues:
             table.add_row("", "", Text("No active issues", style="dim italic"), "", "")
         else:
-            for issue in visible_issues:
+            for issue in self._linear_issues:
                 assignee = issue.assignee_initials or ""
                 title = issue.title[:50] + "…" if len(issue.title) > 50 else issue.title
                 table.add_row(
@@ -634,7 +730,8 @@ class StatusDashboard(App):
                     key=f"linear:{issue.id}:{issue.team_id}:{issue.url}",
                 )
 
-            self._restore_cursor_by_key(table, selected_key)
+            if selected_key:
+                self._restore_cursor_by_key(table, selected_key)
         table.refresh_line_numbers()
 
     def action_refresh(self) -> None:
@@ -642,6 +739,83 @@ class StatusDashboard(App):
         self.notify("Refreshing...")
 
     def action_restart(self) -> None:
+        self._do_upgrade_and_restart()
+
+    def action_focus_previous_pane(self) -> None:
+        """Move focus to the previous pane."""
+        tables = list(self.query(DataTable))
+        if not tables:
+            return
+        focused = self.focused
+        if not isinstance(focused, DataTable) or focused not in tables:
+            tables[-1].focus()
+            return
+        current_idx = tables.index(focused)
+        prev_idx = (current_idx - 1) % len(tables)
+        tables[prev_idx].focus()
+
+    def action_focus_next_pane(self) -> None:
+        """Move focus to the next pane."""
+        tables = list(self.query(DataTable))
+        if not tables:
+            return
+        focused = self.focused
+        if not isinstance(focused, DataTable) or focused not in tables:
+            tables[0].focus()
+            return
+        current_idx = tables.index(focused)
+        next_idx = (current_idx + 1) % len(tables)
+        tables[next_idx].focus()
+
+    def _is_uv_tool(self) -> bool:
+        """Check if this app is installed as a uv tool."""
+        import shutil
+        import subprocess
+
+        if not shutil.which("uv"):
+            return False
+        try:
+            result = subprocess.run(
+                ["uv", "tool", "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return "status-dashboard" in result.stdout
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return False
+
+    def _upgrade_uv_tool(self) -> tuple[bool, str]:
+        """Force reinstall the uv tool and return (success, message)."""
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                [
+                    "uv",
+                    "tool",
+                    "install",
+                    "--force",
+                    "git+https://github.com/tbroadley/status-dashboard",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode != 0:
+                return False, result.stderr[:100]
+            return True, ""
+        except subprocess.TimeoutExpired:
+            return False, "Reinstall timed out"
+
+    @work(exclusive=False)
+    async def _do_upgrade_and_restart(self) -> None:
+        if self._is_uv_tool():
+            self.notify("Upgrading status-dashboard...")
+            success, error = await asyncio.to_thread(self._upgrade_uv_tool)
+            if not success:
+                self.notify(f"Upgrade failed: {error}", severity="warning")
+
         self.exit()
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
@@ -664,7 +838,8 @@ class StatusDashboard(App):
         | TodoistDeferAction
         | TodoistMoveAction
         | LinearSetStateAction
-        | LinearAssignAction,
+        | LinearAssignAction
+        | LinearMoveAction,
     ) -> None:
         """Execute the undo operation for a given action."""
         success = False
@@ -705,6 +880,13 @@ class StatusDashboard(App):
             if success:
                 self._refresh_linear()
 
+        elif isinstance(action, LinearMoveAction):
+            success = await asyncio.to_thread(
+                linear.update_sort_order, action.issue_id, action.previous_sort_order
+            )
+            if success:
+                self._refresh_linear()
+
         if success:
             self.notify(f"Undid: {action.description}")
         else:
@@ -724,6 +906,9 @@ class StatusDashboard(App):
         elif key.startswith("review:"):
             # Format: "review:{repo}:{number}:{url}"
             url = key.split(":", 3)[3]
+        elif key.startswith("notif:"):
+            # Format: "notif:{thread_id}:{repo}:{pr_number}:{url}"
+            url = key.split(":", 4)[4]
         else:
             # GitHub PRs use URL directly as key
             url = key
@@ -772,7 +957,8 @@ class StatusDashboard(App):
             return ""
         try:
             row_data = table.get_row_at(table.cursor_row)
-            return str(row_data[2]) if len(row_data) > 2 else ""
+            col_idx = 5 if table.id == "todoist-table" else 2
+            return str(row_data[col_idx]) if len(row_data) > col_idx else ""
         except Exception:
             return ""
 
@@ -917,6 +1103,8 @@ class StatusDashboard(App):
 
         self._render_todoist_table(preserve_cursor=False)
         focused.move_cursor(row=target_row)
+        row_region = focused._get_row_region(target_row)
+        focused.scroll_to_region(row_region, center=True, animate=False)
 
         self._schedule_todoist_sync()
 
@@ -938,6 +1126,46 @@ class StatusDashboard(App):
         if not success:
             self.notify("Failed to save task order", severity="error")
             self._refresh_todoist()
+
+    def action_reschedule_overdue_to_today(self) -> None:
+        """Reschedule all overdue Todoist tasks to today."""
+        focused = self.focused
+        if not isinstance(focused, DataTable):
+            return
+
+        if focused.id != "todoist-table":
+            self.notify("Can only reschedule from Todoist panel", severity="warning")
+            return
+
+        today = date.today().isoformat()
+        overdue_tasks = [
+            t for t in self._todoist_tasks if t.due_date and t.due_date < today
+        ]
+
+        if not overdue_tasks:
+            self.notify("No overdue tasks to reschedule")
+            return
+
+        self._do_reschedule_overdue_to_today(overdue_tasks)
+
+    @work(exclusive=False)
+    async def _do_reschedule_overdue_to_today(self, tasks: list[todoist.Task]) -> None:
+        success_count = 0
+        for task in tasks:
+            success = await asyncio.to_thread(todoist.reschedule_to_today, task.id)
+            if success:
+                success_count += 1
+
+        if success_count == len(tasks):
+            self.notify(f"Rescheduled {success_count} task(s) to today")
+        elif success_count > 0:
+            self.notify(
+                f"Rescheduled {success_count}/{len(tasks)} tasks", severity="warning"
+            )
+        else:
+            self.notify("Failed to reschedule tasks", severity="error")
+
+        self._refresh_todoist()
 
     def action_open_task_link(self) -> None:
         """Open the first link found in the selected Todoist task's description."""
@@ -1236,25 +1464,122 @@ class StatusDashboard(App):
         else:
             self.notify("Failed to merge PR", severity="error")
 
+    def action_copy_pr_link(self) -> None:
+        """Copy the selected PR's URL to the clipboard."""
+        focused = self.focused
+        if not isinstance(focused, DataTable):
+            return
+
+        if focused.id not in (
+            "my-prs-table",
+            "review-requests-table",
+            "notifications-table",
+        ):
+            self.notify("Can only copy links from PR tables", severity="warning")
+            return
+
+        if focused.cursor_row is None or focused.row_count == 0:
+            return
+
+        cell_key = focused.coordinate_to_cell_key(Coordinate(focused.cursor_row, 0))
+        if not cell_key.row_key or not cell_key.row_key.value:
+            return
+
+        key = str(cell_key.row_key.value)
+
+        if focused.id == "my-prs-table":
+            url = key
+        elif key.startswith("review:"):
+            url = key.split(":", 3)[3]
+        elif key.startswith("notif:"):
+            url = key.split(":", 4)[4]
+        else:
+            return
+
+        self.copy_to_clipboard(url)
+        self.notify("Link copied to clipboard")
+
+    def action_mark_notification_read(self) -> None:
+        """Mark the selected notification as read."""
+        focused = self.focused
+        if not isinstance(focused, DataTable):
+            return
+
+        if focused.id != "notifications-table":
+            self.notify("Can only mark notifications as read", severity="warning")
+            return
+
+        if focused.cursor_row is None or focused.row_count == 0:
+            return
+
+        cell_key = focused.coordinate_to_cell_key(Coordinate(focused.cursor_row, 0))
+        if not cell_key.row_key or not cell_key.row_key.value:
+            return
+
+        key = str(cell_key.row_key.value)
+
+        if not key.startswith("notif:"):
+            return
+
+        # Key format: "notif:{thread_id}:{repo}:{pr_number}:{url}"
+        parts = key.split(":", 4)
+        if len(parts) >= 2:
+            thread_id = parts[1]
+            self._do_mark_notification_read(thread_id)
+
+    @work(exclusive=False)
+    async def _do_mark_notification_read(self, thread_id: str) -> None:
+        success = await asyncio.to_thread(github.mark_notification_read, thread_id)
+        if success:
+            self.notify("Notification marked as read")
+            self._refresh_gh_notifications()
+        else:
+            self.notify("Failed to mark notification as read", severity="error")
+
     def action_create_todoist_task(self) -> None:
         """Show modal to create a new Todoist task."""
-        self.push_screen(CreateTodoistTaskModal(), self._handle_todoist_task_created)
+        table = self.query_one("#todoist-table", TodoistDataTable)
+        insert_position = table.cursor_row or 0
 
-    def _handle_todoist_task_created(self, result: dict | None) -> None:
+        def handle_result(result: dict[str, str] | None) -> None:
+            self._handle_todoist_task_created(result, insert_position)
+
+        self.push_screen(CreateTodoistTaskModal(), handle_result)
+
+    def _handle_todoist_task_created(
+        self, result: dict[str, str] | None, insert_position: int
+    ) -> None:
         """Handle the result from the Todoist task creation modal."""
         if result:
             content = result["content"]
             due_string = result["due_string"]
-            self._do_create_todoist_task(content, due_string)
+            self._do_create_todoist_task(content, due_string, insert_position)
 
     @work(exclusive=False)
-    async def _do_create_todoist_task(self, content: str, due_string: str) -> None:
-        success = await asyncio.to_thread(todoist.create_task, content, due_string)
-        if success:
-            self.notify("Task created!")
-            self._refresh_todoist()
-        else:
+    async def _do_create_todoist_task(
+        self, content: str, due_string: str, insert_position: int
+    ) -> None:
+        new_task_id = await asyncio.to_thread(todoist.create_task, content, due_string)
+        if not new_task_id:
             self.notify("Failed to create task", severity="error")
+            return
+
+        self.notify("Task created!")
+
+        if not self._todoist_tasks:
+            self._refresh_todoist()
+            return
+
+        new_orders: dict[str, int] = {}
+        for idx, task in enumerate(self._todoist_tasks):
+            if idx < insert_position:
+                new_orders[task.id] = idx
+            else:
+                new_orders[task.id] = idx + 1
+        new_orders[new_task_id] = insert_position
+
+        await asyncio.to_thread(todoist.update_day_orders, new_orders)
+        self._refresh_todoist()
 
     def action_create_linear_issue(self) -> None:
         """Show modal to create a new Linear issue."""
@@ -1308,6 +1633,119 @@ class StatusDashboard(App):
             self._refresh_linear()
         else:
             self.notify("Failed to create issue", severity="error")
+
+    def action_move_linear_issue_down(self) -> None:
+        """Move the selected Linear issue down."""
+        self._move_linear_issue(1)
+
+    def action_move_linear_issue_up(self) -> None:
+        """Move the selected Linear issue up."""
+        self._move_linear_issue(-1)
+
+    def _move_linear_issue(self, direction: int) -> None:
+        """Move the selected Linear issue up (-1) or down (+1) within its status group."""
+        focused = self.focused
+        if not isinstance(focused, DataTable):
+            return
+
+        if focused.id != "linear-table":
+            self.notify("Can only move Linear issues", severity="warning")
+            return
+
+        if focused.cursor_row is None or focused.row_count == 0:
+            return
+
+        current_row = focused.cursor_row
+        target_row = current_row + direction
+
+        if target_row < 0 or target_row >= len(self._linear_issues):
+            return
+
+        moved_issue = self._linear_issues[current_row]
+        target_issue = self._linear_issues[target_row]
+
+        if moved_issue.state != target_issue.state:
+            return
+
+        original_sort_order = moved_issue.sort_order
+
+        self._linear_issues[current_row], self._linear_issues[target_row] = (
+            self._linear_issues[target_row],
+            self._linear_issues[current_row],
+        )
+
+        self._render_linear_table(preserve_cursor=False)
+        focused.move_cursor(row=target_row)
+        row_region = focused._get_row_region(target_row)
+        focused.scroll_to_region(row_region, center=True, animate=False)
+
+        self._schedule_linear_sync(moved_issue.id, original_sort_order, target_row)
+
+    def _schedule_linear_sync(
+        self, issue_id: str, original_sort_order: float, target_row: int
+    ) -> None:
+        """Schedule a debounced sync of issue order to Linear API."""
+        if self._linear_debounce_handle:
+            self._linear_debounce_handle.stop()
+
+        self._linear_pending_move = (issue_id, original_sort_order, target_row)
+        self._linear_debounce_handle = self.set_timer(0.5, self._flush_linear_order)
+
+    @work(exclusive=False)
+    async def _flush_linear_order(self) -> None:
+        """Send current issue order to Linear API."""
+        self._linear_debounce_handle = None
+
+        if not hasattr(self, "_linear_pending_move"):
+            return
+
+        issue_id, original_sort_order, target_row = self._linear_pending_move
+        delattr(self, "_linear_pending_move")
+
+        if target_row < 0 or target_row >= len(self._linear_issues):
+            return
+
+        moved_issue = self._linear_issues[target_row]
+        same_status_issues = [
+            (idx, i)
+            for idx, i in enumerate(self._linear_issues)
+            if i.state == moved_issue.state
+        ]
+
+        pos_in_group = next(
+            i for i, (idx, _) in enumerate(same_status_issues) if idx == target_row
+        )
+
+        if pos_in_group == 0:
+            new_sort_order = (
+                same_status_issues[1][1].sort_order - 1.0
+                if len(same_status_issues) > 1
+                else 0.0
+            )
+        elif pos_in_group == len(same_status_issues) - 1:
+            new_sort_order = same_status_issues[-2][1].sort_order + 1.0
+        else:
+            prev_order = same_status_issues[pos_in_group - 1][1].sort_order
+            next_order = same_status_issues[pos_in_group + 1][1].sort_order
+            new_sort_order = (prev_order + next_order) / 2.0
+
+        self._linear_issues[target_row].sort_order = new_sort_order
+
+        success = await asyncio.to_thread(
+            linear.update_sort_order, issue_id, new_sort_order
+        )
+        if success:
+            issue = self._linear_issues[target_row]
+            self._undo_stack.push(
+                LinearMoveAction(
+                    issue_id=issue_id,
+                    previous_sort_order=original_sort_order,
+                    description=f"Move {issue.identifier}",
+                )
+            )
+        else:
+            self.notify("Failed to save issue order", severity="error")
+            self._refresh_linear()
 
 
 def main():
