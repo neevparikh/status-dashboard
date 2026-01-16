@@ -21,6 +21,7 @@ class Task:
     day_order: int = 0
     due_date: str | None = None
     due_time: str | None = None
+    comment_count: int = 0
 
 
 def _get_token() -> str | None:
@@ -122,6 +123,7 @@ def get_today_tasks(api_token: str | None = None) -> list[Task]:
                 day_order=item.get("day_order", 0),
                 due_date=due_date,
                 due_time=due_time,
+                comment_count=item.get("comment_count", 0),
             )
         )
 
