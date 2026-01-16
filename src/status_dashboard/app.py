@@ -7,6 +7,7 @@ import re
 import sys
 import webbrowser
 from collections import defaultdict
+from datetime import date
 from itertools import groupby
 from pathlib import Path
 
@@ -285,6 +286,7 @@ class TodoistDataTable(VimDataTable):
     """DataTable for Todoist tasks with defer binding."""
 
     BINDINGS = [
+        Binding("T", "app.reschedule_overdue_to_today", "Reschedule All"),
         Binding("a", "app.create_todoist_task", "Add Task"),
         Binding("c", "app.complete_task", "Complete"),
         Binding("n", "app.defer_task", "Defer"),
@@ -447,7 +449,7 @@ class StatusDashboard(App):
         self._setup_table(notifs)
 
         todo = self.query_one("#todoist-table", DataTable)
-        todo.add_columns("#", "", "Task")
+        todo.add_columns("#", "!", "", "Task")
         self._setup_table(todo)
 
         lin = self.query_one("#linear-table", DataTable)
@@ -624,16 +626,19 @@ class StatusDashboard(App):
 
         table.clear()
 
+        today = date.today().isoformat()
         if not self._todoist_tasks:
-            table.add_row("", "", Text("No tasks for today", style="dim italic"))
+            table.add_row("", "", "", Text("No tasks for today", style="dim italic"))
         else:
             for task in self._todoist_tasks:
+                overdue = "!" if task.due_date and task.due_date < today else ""
                 checkbox = "[x]" if task.is_completed else "[ ]"
                 content = (
                     task.content[:60] + "…" if len(task.content) > 60 else task.content
                 )
                 table.add_row(
                     "",
+                    overdue,
                     checkbox,
                     content,
                     key=f"todoist:{task.id}:{task.url}",
@@ -899,7 +904,8 @@ class StatusDashboard(App):
             return ""
         try:
             row_data = table.get_row_at(table.cursor_row)
-            return str(row_data[2]) if len(row_data) > 2 else ""
+            col_idx = 3 if table.id == "todoist-table" else 2
+            return str(row_data[col_idx]) if len(row_data) > col_idx else ""
         except Exception:
             return ""
 
@@ -1067,6 +1073,46 @@ class StatusDashboard(App):
         if not success:
             self.notify("Failed to save task order", severity="error")
             self._refresh_todoist()
+
+    def action_reschedule_overdue_to_today(self) -> None:
+        """Reschedule all overdue Todoist tasks to today."""
+        focused = self.focused
+        if not isinstance(focused, DataTable):
+            return
+
+        if focused.id != "todoist-table":
+            self.notify("Can only reschedule from Todoist panel", severity="warning")
+            return
+
+        today = date.today().isoformat()
+        overdue_tasks = [
+            t for t in self._todoist_tasks if t.due_date and t.due_date < today
+        ]
+
+        if not overdue_tasks:
+            self.notify("No overdue tasks to reschedule")
+            return
+
+        self._do_reschedule_overdue_to_today(overdue_tasks)
+
+    @work(exclusive=False)
+    async def _do_reschedule_overdue_to_today(self, tasks: list[todoist.Task]) -> None:
+        success_count = 0
+        for task in tasks:
+            success = await asyncio.to_thread(todoist.reschedule_to_today, task.id)
+            if success:
+                success_count += 1
+
+        if success_count == len(tasks):
+            self.notify(f"Rescheduled {success_count} task(s) to today")
+        elif success_count > 0:
+            self.notify(
+                f"Rescheduled {success_count}/{len(tasks)} tasks", severity="warning"
+            )
+        else:
+            self.notify("Failed to reschedule tasks", severity="error")
+
+        self._refresh_todoist()
 
     def action_open_task_link(self) -> None:
         """Open the first link found in the selected Todoist task's description."""

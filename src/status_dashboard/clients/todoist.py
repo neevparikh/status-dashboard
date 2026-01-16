@@ -19,6 +19,7 @@ class Task:
     is_completed: bool
     url: str
     day_order: int = 0
+    due_date: str | None = None
 
 
 def _get_token() -> str | None:
@@ -97,6 +98,7 @@ def get_today_tasks(api_token: str | None = None) -> list[Task]:
                 is_completed=item.get("checked", False),
                 url=url,
                 day_order=item.get("day_order", 0),
+                due_date=due_date,
             )
         )
 
@@ -300,6 +302,35 @@ def set_due_date(
         return False
     except httpx.RequestError as e:
         logger.error("Failed to set due date: %s", e)
+        return False
+
+
+def reschedule_to_today(task_id: str, api_token: str | None = None) -> bool:
+    """Reschedule a task to today. Returns True on success."""
+    token = api_token or _get_token()
+    if not token:
+        logger.error("TODOIST_API_TOKEN not set")
+        return False
+
+    today = date.today().isoformat()
+
+    try:
+        response = httpx.post(
+            f"https://api.todoist.com/rest/v2/tasks/{task_id}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={"due_date": today},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return True
+    except httpx.HTTPStatusError as e:
+        logger.error("Failed to reschedule task: %s", e.response.status_code)
+        return False
+    except httpx.RequestError as e:
+        logger.error("Failed to reschedule task: %s", e)
         return False
 
 
