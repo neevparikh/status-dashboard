@@ -115,7 +115,9 @@ class Footer(TextualFooter):
         for binding, enabled, tooltip in bindings:
             action_to_bindings[binding.action].append((binding, enabled, tooltip))
 
-        self.styles.grid_size_columns = len(action_to_bindings)
+        num_bindings = len(action_to_bindings)
+        self.styles.grid_size_columns = (num_bindings + 1) // 2
+        self.styles.grid_size_rows = 2
 
         for group, multi_bindings_iterable in groupby(
             action_to_bindings.values(),
@@ -389,6 +391,13 @@ class StatusDashboard(App):
 
     Footer {
         dock: bottom;
+        height: 2;
+        layout: grid;
+        grid-gutter: 0 1;
+    }
+
+    FooterKey {
+        height: 1;
     }
 
     """
