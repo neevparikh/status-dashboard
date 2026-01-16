@@ -39,6 +39,7 @@ class ReviewRequest:
     url: str
     author: str
     created_at: datetime
+    has_user_reviewed: bool = False
 
 
 @dataclass
@@ -152,8 +153,19 @@ query {{
           login
         }}
         createdAt
+        latestReviews(first: 20) {{
+          nodes {{
+            author {{
+              login
+            }}
+            state
+          }}
+        }}
       }}
     }}
+  }}
+  viewer {{
+    login
   }}
 }}
 """
@@ -293,11 +305,20 @@ def get_review_requests(org: str | None = None) -> list[ReviewRequest]:
         return []
 
     prs = []
-    nodes = result.get("data", {}).get("search", {}).get("nodes", [])
+    data = result.get("data", {})
+    nodes = data.get("search", {}).get("nodes", [])
+    viewer_login = data.get("viewer", {}).get("login", "").lower()
 
     for pr in nodes:
         if not pr:
             continue
+
+        reviews = pr.get("latestReviews", {}).get("nodes", [])
+        has_user_reviewed = any(
+            r.get("author", {}).get("login", "").lower() == viewer_login
+            for r in reviews
+            if r
+        )
 
         prs.append(
             ReviewRequest(
@@ -307,6 +328,7 @@ def get_review_requests(org: str | None = None) -> list[ReviewRequest]:
                 url=pr["url"],
                 author=pr.get("author", {}).get("login", "unknown"),
                 created_at=_parse_datetime(pr["createdAt"]),
+                has_user_reviewed=has_user_reviewed,
             )
         )
 
