@@ -675,14 +675,20 @@ class StatusDashboard(App):
 
         table.clear()
 
-        today = date.today().isoformat()
+        today = date.today()
+        selected = self._todoist_selected_date
         if not self._todoist_tasks:
-            table.add_row(
-                "", "", "", "", "", Text("No tasks for today", style="dim italic")
-            )
+            if selected == today:
+                empty_msg = "No tasks for today"
+            elif selected == today + timedelta(days=1):
+                empty_msg = "No tasks for tomorrow"
+            else:
+                empty_msg = f"No tasks on {selected.strftime('%a %b %d')}"
+            table.add_row("", "", "", "", "", Text(empty_msg, style="dim italic"))
         else:
+            today_str = today.isoformat()
             for task in self._todoist_tasks:
-                overdue = "!" if task.due_date and task.due_date < today else ""
+                overdue = "!" if task.due_date and task.due_date < today_str else ""
                 checkbox = "[x]" if task.is_completed else "[ ]"
                 time_display = task.due_time or ""
                 comment_display = (
