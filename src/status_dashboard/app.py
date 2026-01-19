@@ -64,6 +64,12 @@ def _load_hidden_review_requests() -> set[tuple[str, int]]:
 
 HIDDEN_REVIEW_REQUESTS = _load_hidden_review_requests()
 
+# Shorten Linear state display names to fit column width
+LINEAR_STATE_SHORT = {
+    "In Progress": "progress",
+    "In Review": "review",
+}
+
 
 def _setup_logging() -> None:
     """Configure logging to stderr and a rotating log file."""
@@ -500,7 +506,7 @@ class StatusDashboard(App):
                 elif pr.is_approved:
                     status = "approved"
                 elif pr.needs_response:
-                    status = "needs response"
+                    status = "respond"
                 elif pr.has_review:
                     status = "reviewed"
                 else:
@@ -731,11 +737,12 @@ class StatusDashboard(App):
             for issue in self._linear_issues:
                 assignee = issue.assignee_initials or ""
                 title = issue.title[:50] + "…" if len(issue.title) > 50 else issue.title
+                state_display = LINEAR_STATE_SHORT.get(issue.state, issue.state)
                 table.add_row(
                     "",
                     issue.identifier,
                     title,
-                    issue.state,
+                    state_display,
                     assignee,
                     key=f"linear:{issue.id}:{issue.team_id}:{issue.url}",
                 )
